@@ -58,9 +58,43 @@ func TestNextRetryAtUsesExponentialBackoff(t *testing.T) {
 	}
 }
 
+func TestServiceListRejectsInvalidStatusFilter(t *testing.T) {
+	service := NewService(&fakeRepo{}, 3, 30, 300)
+
+	_, err := service.List(context.Background(), ListFilter{Status: Status("UNKNOWN"), Page: 1, PageSize: 20})
+	if err == nil {
+		t.Fatal("expected invalid status filter error")
+	}
+}
+
+func TestServiceCancelAllowsPendingJob(t *testing.T) {
+	id := uuid.New()
+	repo := &fakeRepo{existing: Job{ID: id, Status: StatusPending}}
+	service := NewService(repo, 3, 30, 300)
+
+	if err := service.Cancel(context.Background(), id); err != nil {
+		t.Fatalf("Cancel returned error: %v", err)
+	}
+	if repo.transitionTo != StatusCancelled {
+		t.Fatalf("expected transition to CANCELLED, got %s", repo.transitionTo)
+	}
+}
+
+func TestServiceCancelRejectsSucceededJob(t *testing.T) {
+	id := uuid.New()
+	repo := &fakeRepo{existing: Job{ID: id, Status: StatusSucceeded}}
+	service := NewService(repo, 3, 30, 300)
+
+	if err := service.Cancel(context.Background(), id); err == nil {
+		t.Fatal("expected invalid transition error")
+	}
+}
+
 type fakeRepo struct {
 	Repository
-	created Job
+	created      Job
+	existing     Job
+	transitionTo Status
 }
 
 func (f *fakeRepo) Create(ctx context.Context, j Job) (Job, error) {
@@ -75,5 +109,13 @@ func (f *fakeRepo) List(ctx context.Context, filter ListFilter) (Page, error) {
 }
 
 func (f *fakeRepo) GetByID(ctx context.Context, id uuid.UUID) (Job, error) {
-	return Job{}, nil
+	if f.existing.ID != uuid.Nil {
+		return f.existing, nil
+	}
+	return Job{ID: id, Status: StatusPending}, nil
+}
+
+func (f *fakeRepo) TransitionJob(ctx context.Context, id uuid.UUID, from []Status, to Status) error {
+	f.transitionTo = to
+	return nil
 }

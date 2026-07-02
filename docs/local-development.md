@@ -13,6 +13,8 @@ export DATABASE_URL="postgres://scheduler:scheduler@localhost:5432/scheduler_db?
 make migrate-up
 ```
 
+The migration command uses the local `migrate` CLI and the SQL files in `migrations/`.
+
 Run locally without Docker:
 
 ```bash

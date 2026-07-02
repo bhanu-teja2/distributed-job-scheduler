@@ -14,6 +14,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.4"
+      - uses: Azure/setup-helm@v5.0.1
       - name: Format check
         run: |
           gofmt -w .
@@ -30,3 +31,7 @@ jobs:
         run: docker build -f Dockerfile.api .
       - name: Docker build worker
         run: docker build -f Dockerfile.worker .
+      - name: Helm lint
+        run: helm lint charts/distributed-job-scheduler
+      - name: Helm template
+        run: helm template scheduler charts/distributed-job-scheduler

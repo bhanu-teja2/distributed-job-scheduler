@@ -1,0 +1,24 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "scheduler.fullname" . }}-migrate
+  labels:
+    {{- include "scheduler.labels" . | nindent 4 }}
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: {{ .Values.migrations.image | quote }}
+          args:
+            - "-path=/migrations"
+            - "-database=postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=$(POSTGRES_SSL_MODE)"
+            - "up"
+          envFrom:
+            - configMapRef:
+                name: {{ include "scheduler.fullname" . }}-config
+            - secretRef:
+                name: {{ include "scheduler.fullname" . }}-secret
+{{- end }}

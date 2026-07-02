@@ -1,0 +1,63 @@
+api:
+  replicas: 2
+  port: 8080
+  image:
+    repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources: {}
+
+worker:
+  replicas: 2
+  image:
+    repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-worker
+    tag: latest
+    pullPolicy: IfNotPresent
+  concurrency: 5
+  pollIntervalSeconds: 5
+  batchSize: 10
+  resources: {}
+
+env:
+  appEnv: production
+  logLevel: info
+  jobLockTTLSeconds: 360
+  jobDefaultTimeoutSeconds: 300
+  jobDefaultMaxRetries: 3
+  jobDefaultBackoffSeconds: 30
+  workerHeartbeatTTLSeconds: 30
+  workerHeartbeatIntervalSeconds: 10
+
+postgres:
+  host: postgres
+  port: 5432
+  user: scheduler
+  password: scheduler
+  database: scheduler_db
+  sslMode: disable
+
+redis:
+  addr: redis:6379
+  password: ""
+  db: 0
+
+kafka:
+  brokers: kafka:9092
+  eventsTopic: scheduler.events
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: false
+  className: ""
+  host: scheduler.local
+  annotations: {}
+
+migrations:
+  enabled: false
+  image: migrate/migrate:v4.17.1
+
+serviceAccount:
+  create: true
+  name: ""

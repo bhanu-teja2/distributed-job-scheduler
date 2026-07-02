@@ -1,6 +1,7 @@
 package job
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -26,6 +27,10 @@ func (h *Handler) Routes() chi.Router {
 	r.Get("/", h.list)
 	r.Get("/{jobID}", h.get)
 	r.Get("/{jobID}/attempts", h.attempts)
+	r.Post("/{jobID}/cancel", h.cancel)
+	r.Post("/{jobID}/pause", h.pause)
+	r.Post("/{jobID}/resume", h.resume)
+	r.Post("/{jobID}/retry", h.retry)
 	return r
 }
 
@@ -91,6 +96,34 @@ func (h *Handler) attempts(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, r, http.StatusOK, attempts)
 }
 
+func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
+	h.transition(w, r, h.service.Cancel)
+}
+
+func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
+	h.transition(w, r, h.service.Pause)
+}
+
+func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
+	h.transition(w, r, h.service.Resume)
+}
+
+func (h *Handler) retry(w http.ResponseWriter, r *http.Request) {
+	h.transition(w, r, h.service.Retry)
+}
+
+func (h *Handler) transition(w http.ResponseWriter, r *http.Request, fn func(context.Context, uuid.UUID) error) {
+	id, ok := parseUUID(w, r, "jobID")
+	if !ok {
+		return
+	}
+	if err := fn(r.Context(), id); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	response.JSON(w, r, http.StatusOK, map[string]string{"job_id": id.String()})
+}
+
 func (h *Handler) deadLetters(w http.ResponseWriter, r *http.Request) {
 	items, err := h.service.ListDeadLetters(r.Context(), queryInt(r, "page", 1), queryInt(r, "page_size", 20))
 	if err != nil {
@@ -139,6 +172,10 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, appErrors.ErrInvalidInput):
 		response.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+	case errors.Is(err, appErrors.ErrInvalidTransition):
+		response.Error(w, r, http.StatusConflict, "INVALID_TRANSITION", err.Error())
+	case errors.Is(err, appErrors.ErrConflict):
+		response.Error(w, r, http.StatusConflict, "CONFLICT", err.Error())
 	case errors.Is(err, appErrors.ErrNotFound):
 		response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "resource not found")
 	default:

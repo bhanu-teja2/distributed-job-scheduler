@@ -1,0 +1,6 @@
+apiVersion: v2
+name: distributed-job-scheduler
+description: Production-style distributed job scheduler API and worker.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

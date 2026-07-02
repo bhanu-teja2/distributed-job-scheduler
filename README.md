@@ -61,9 +61,20 @@ make test
 make race
 ```
 
+## Kubernetes
+
+```bash
+helm lint charts/distributed-job-scheduler
+helm template scheduler charts/distributed-job-scheduler
+```
+
+The Helm chart deploys the API and worker services and expects PostgreSQL, Redis, and Kafka connection details through values.
+
+## System Design
+
+Low-level design docs and Mermaid diagrams are in `docs/system-design/`.
+
 ## Roadmap
 
-- Wire Redis locks into the worker execution path.
-- Publish lifecycle events from API and worker flows through Kafka.
-- Add operational APIs for cancel, pause, resume, and manual retry.
-- Add Prometheus metrics and an optional dashboard.
+- Add optional frontend dashboard.
+- Add real external job handlers behind the current handler interface.

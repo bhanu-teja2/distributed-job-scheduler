@@ -22,10 +22,16 @@ type Repository interface {
 	CompleteAttempt(ctx context.Context, attemptID uuid.UUID, duration time.Duration) error
 	FailAttempt(ctx context.Context, attemptID uuid.UUID, duration time.Duration, message string) error
 	MarkSucceeded(ctx context.Context, jobID uuid.UUID) error
+	MarkSucceededByWorker(ctx context.Context, jobID uuid.UUID, workerID string) error
 	MarkFailedForRetry(ctx context.Context, job Job, message string, nextRunAt time.Time) error
+	MarkFailedForRetryByWorker(ctx context.Context, job Job, workerID string, message string, nextRetryCount int, nextRunAt time.Time) error
 	MoveToDeadLetter(ctx context.Context, job Job, message string) error
+	MoveToDeadLetterByWorker(ctx context.Context, job Job, workerID string, message string, finalRetryCount int) error
+	ReleaseClaim(ctx context.Context, jobID uuid.UUID, workerID string, status Status) error
+	TransitionJob(ctx context.Context, id uuid.UUID, from []Status, to Status) error
 	ListDeadLetters(ctx context.Context, page, pageSize int) ([]DeadLetterJob, error)
 	RequeueDeadLetter(ctx context.Context, deadLetterID uuid.UUID, runAt time.Time) (Job, error)
+	RecoverExpiredRunningJobs(ctx context.Context, reason string) (int64, error)
 }
 
 type PostgresRepository struct {
@@ -159,9 +165,31 @@ func (r *PostgresRepository) MarkSucceeded(ctx context.Context, jobID uuid.UUID)
 	return err
 }
 
+func (r *PostgresRepository) MarkSucceededByWorker(ctx context.Context, jobID uuid.UUID, workerID string) error {
+	tag, err := r.pool.Exec(ctx, `UPDATE jobs SET status='SUCCEEDED', completed_at=now(), locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1 AND locked_by=$2 AND status='RUNNING'`, jobID, workerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return appErrors.ErrConflict
+	}
+	return nil
+}
+
 func (r *PostgresRepository) MarkFailedForRetry(ctx context.Context, j Job, message string, nextRunAt time.Time) error {
 	_, err := r.pool.Exec(ctx, `UPDATE jobs SET status='RETRY_SCHEDULED', retry_count=retry_count+1, run_at=$2, last_error=$3, failed_at=now(), locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1`, j.ID, nextRunAt, message)
 	return err
+}
+
+func (r *PostgresRepository) MarkFailedForRetryByWorker(ctx context.Context, j Job, workerID string, message string, nextRetryCount int, nextRunAt time.Time) error {
+	tag, err := r.pool.Exec(ctx, `UPDATE jobs SET status='RETRY_SCHEDULED', retry_count=$2, run_at=$3, last_error=$4, failed_at=now(), locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1 AND locked_by=$5 AND status='RUNNING'`, j.ID, nextRetryCount, nextRunAt, message, workerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return appErrors.ErrConflict
+	}
+	return nil
 }
 
 func (r *PostgresRepository) MoveToDeadLetter(ctx context.Context, j Job, message string) error {
@@ -179,6 +207,91 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,now())`, uuid.New(), j.ID, j.Name, j.JobType, j.Pay
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) MoveToDeadLetterByWorker(ctx context.Context, j Job, workerID string, message string, finalRetryCount int) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `UPDATE jobs SET status='DEAD_LETTERED', retry_count=$2, last_error=$3, failed_at=now(), locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1 AND locked_by=$4 AND status='RUNNING'`, j.ID, finalRetryCount, message, workerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return appErrors.ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO dead_letter_jobs (id, original_job_id, name, job_type, payload, final_error, retry_count, failed_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,now())`, uuid.New(), j.ID, j.Name, j.JobType, j.Payload, message, finalRetryCount); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) ReleaseClaim(ctx context.Context, jobID uuid.UUID, workerID string, status Status) error {
+	tag, err := r.pool.Exec(ctx, `UPDATE jobs SET status=$3, locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1 AND locked_by=$2 AND status='RUNNING'`, jobID, workerID, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return appErrors.ErrConflict
+	}
+	return nil
+}
+
+func (r *PostgresRepository) TransitionJob(ctx context.Context, id uuid.UUID, from []Status, to Status) error {
+	statuses := make([]string, 0, len(from))
+	for _, status := range from {
+		statuses = append(statuses, string(status))
+	}
+	query := `UPDATE jobs SET status=$2, updated_at=now(), cancelled_at=CASE WHEN $2='CANCELLED' THEN now() ELSE cancelled_at END, locked_by=NULL, locked_until=NULL WHERE id=$1 AND status = ANY($3)`
+	tag, err := r.pool.Exec(ctx, query, id, to, statuses)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return appErrors.ErrInvalidTransition
+	}
+	return nil
+}
+
+func (r *PostgresRepository) RecoverExpiredRunningJobs(ctx context.Context, reason string) (int64, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `SELECT id FROM jobs WHERE status='RUNNING' AND locked_until < now()`)
+	if err != nil {
+		return 0, err
+	}
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE job_attempts SET status='FAILED', failed_at=now(), error_message=$2 WHERE job_id = ANY($1) AND status='RUNNING'`, ids, reason); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE jobs SET status='RETRY_SCHEDULED', locked_by=NULL, locked_until=NULL, last_error=$2, updated_at=now() WHERE id = ANY($1) AND status='RUNNING'`, ids, reason)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) ListDeadLetters(ctx context.Context, page, pageSize int) ([]DeadLetterJob, error) {

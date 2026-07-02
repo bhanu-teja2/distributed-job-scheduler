@@ -19,7 +19,10 @@ type Config struct {
 	RedisPassword            string
 	RedisDB                  int
 	KafkaBrokers             []string
+	KafkaEventsTopic         string
 	JobLockTTL               time.Duration
+	WorkerHeartbeatTTL       time.Duration
+	WorkerHeartbeatInterval  time.Duration
 	JobDefaultTimeout        time.Duration
 	JobDefaultMaxRetries     int
 	JobDefaultBackoffSeconds int
@@ -46,7 +49,10 @@ func Load() Config {
 		RedisPassword:            env("REDIS_PASSWORD", ""),
 		RedisDB:                  envInt("REDIS_DB", 0),
 		KafkaBrokers:             split(env("KAFKA_BROKERS", "localhost:9092")),
+		KafkaEventsTopic:         env("KAFKA_EVENTS_TOPIC", "scheduler.events"),
 		JobLockTTL:               time.Duration(envInt("JOB_LOCK_TTL_SECONDS", 360)) * time.Second,
+		WorkerHeartbeatTTL:       time.Duration(envInt("WORKER_HEARTBEAT_TTL_SECONDS", 30)) * time.Second,
+		WorkerHeartbeatInterval:  time.Duration(envInt("WORKER_HEARTBEAT_INTERVAL_SECONDS", 10)) * time.Second,
 		JobDefaultTimeout:        time.Duration(envInt("JOB_DEFAULT_TIMEOUT_SECONDS", 300)) * time.Second,
 		JobDefaultMaxRetries:     envInt("JOB_DEFAULT_MAX_RETRIES", 3),
 		JobDefaultBackoffSeconds: envInt("JOB_DEFAULT_BACKOFF_SECONDS", 30),

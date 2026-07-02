@@ -7,6 +7,9 @@ import (
 	"time"
 
 	appErrors "github.com/bhanuteja/distributed-job-scheduler/internal/errors"
+	"github.com/bhanuteja/distributed-job-scheduler/internal/events"
+	"github.com/bhanuteja/distributed-job-scheduler/internal/observability"
+	"github.com/bhanuteja/distributed-job-scheduler/internal/scheduler"
 	"github.com/google/uuid"
 )
 
@@ -16,6 +19,8 @@ type Service struct {
 	defaultRetries    int
 	defaultBackoffSec int
 	defaultTimeoutSec int
+	publisher         events.Publisher
+	metrics           observability.Recorder
 }
 
 func NewService(repo Repository, defaultRetries, defaultBackoffSec, defaultTimeoutSec int) *Service {
@@ -25,7 +30,23 @@ func NewService(repo Repository, defaultRetries, defaultBackoffSec, defaultTimeo
 		defaultRetries:    defaultRetries,
 		defaultBackoffSec: defaultBackoffSec,
 		defaultTimeoutSec: defaultTimeoutSec,
+		publisher:         events.NoopPublisher{},
+		metrics:           observability.NoopRecorder{},
 	}
+}
+
+func (s *Service) WithPublisher(publisher events.Publisher) *Service {
+	if publisher != nil {
+		s.publisher = publisher
+	}
+	return s
+}
+
+func (s *Service) WithMetrics(metrics observability.Recorder) *Service {
+	if metrics != nil {
+		s.metrics = metrics
+	}
+	return s
 }
 
 func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResponse, error) {
@@ -56,10 +77,18 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResponse
 	if err != nil {
 		return CreateResponse{}, err
 	}
+	s.metrics.JobCreated(inserted.JobType)
+	_ = s.publisher.Publish(ctx, events.New(events.JobCreated, "scheduler-api", "job", inserted.ID.String(), map[string]any{"job_id": inserted.ID.String(), "job_type": inserted.JobType, "status": inserted.Status, "run_at": inserted.RunAt, "priority": inserted.Priority}))
 	return CreateResponse{JobID: inserted.ID.String(), Status: inserted.Status}, nil
 }
 
 func (s *Service) List(ctx context.Context, filter ListFilter) (Page, error) {
+	if filter.Status != "" && !isKnownStatus(filter.Status) {
+		return Page{}, fmt.Errorf("%w: unsupported status filter", appErrors.ErrInvalidInput)
+	}
+	if filter.JobType != "" && !isSupportedJobType(filter.JobType) {
+		return Page{}, fmt.Errorf("%w: unsupported job_type filter", appErrors.ErrInvalidInput)
+	}
 	return s.repo.List(ctx, filter)
 }
 
@@ -77,6 +106,44 @@ func (s *Service) ListDeadLetters(ctx context.Context, page, pageSize int) ([]De
 
 func (s *Service) RequeueDeadLetter(ctx context.Context, deadLetterID uuid.UUID) (Job, error) {
 	return s.repo.RequeueDeadLetter(ctx, deadLetterID, s.now())
+}
+
+func (s *Service) Cancel(ctx context.Context, id uuid.UUID) error {
+	if err := s.transition(ctx, id, StatusCancelled, []Status{StatusPending, StatusScheduled, StatusRetryScheduled, StatusRunning}); err != nil {
+		return err
+	}
+	_ = s.publisher.Publish(ctx, events.New(events.JobCancelled, "scheduler-api", "job", id.String(), map[string]any{"job_id": id.String()}))
+	return nil
+}
+
+func (s *Service) Pause(ctx context.Context, id uuid.UUID) error {
+	return s.transition(ctx, id, StatusPaused, []Status{StatusPending, StatusScheduled})
+}
+
+func (s *Service) Resume(ctx context.Context, id uuid.UUID) error {
+	return s.transition(ctx, id, StatusScheduled, []Status{StatusPaused})
+}
+
+func (s *Service) Retry(ctx context.Context, id uuid.UUID) error {
+	return s.transition(ctx, id, StatusRetryScheduled, []Status{StatusFailed, StatusDeadLettered})
+}
+
+func (s *Service) transition(ctx context.Context, id uuid.UUID, to Status, allowedFrom []Status) error {
+	current, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	allowed := false
+	for _, from := range allowedFrom {
+		if current.Status == from {
+			allowed = true
+			break
+		}
+	}
+	if !allowed || !scheduler.CanTransition(string(current.Status), string(to)) {
+		return fmt.Errorf("%w: cannot transition %s to %s", appErrors.ErrInvalidTransition, current.Status, to)
+	}
+	return s.repo.TransitionJob(ctx, id, allowedFrom, to)
 }
 
 func (s *Service) withDefaults(req CreateRequest) CreateRequest {
@@ -109,4 +176,18 @@ func NextRetryAt(now time.Time, baseBackoffSeconds int, retryCount int) time.Tim
 
 func ShouldDeadLetter(retryCount, maxRetries int) bool {
 	return retryCount >= maxRetries
+}
+
+func isKnownStatus(status Status) bool {
+	switch status {
+	case StatusPending, StatusScheduled, StatusRunning, StatusSucceeded, StatusFailed, StatusRetryScheduled, StatusDeadLettered, StatusCancelled, StatusPaused:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSupportedJobType(jobType string) bool {
+	_, ok := supportedJobTypes[jobType]
+	return ok
 }

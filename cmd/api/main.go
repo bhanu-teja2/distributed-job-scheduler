@@ -11,9 +11,13 @@ import (
 
 	"github.com/bhanuteja/distributed-job-scheduler/internal/config"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/job"
+	"github.com/bhanuteja/distributed-job-scheduler/internal/kafka"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/logger"
+	"github.com/bhanuteja/distributed-job-scheduler/internal/observability"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/postgres"
+	appRedis "github.com/bhanuteja/distributed-job-scheduler/internal/redis"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/server"
+	"github.com/bhanuteja/distributed-job-scheduler/internal/worker"
 	"go.uber.org/zap"
 )
 
@@ -33,14 +37,23 @@ func main() {
 		log.Fatal("failed to connect postgres", zap.Error(err))
 	}
 	defer db.Close()
+	redisClient, err := appRedis.Connect(ctx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	if err != nil {
+		log.Fatal("failed to connect redis", zap.Error(err))
+	}
+	defer func() { _ = redisClient.Close() }()
 
 	repo := job.NewPostgresRepository(db)
-	service := job.NewService(repo, cfg.JobDefaultMaxRetries, cfg.JobDefaultBackoffSeconds, int(cfg.JobDefaultTimeout.Seconds()))
+	publisher := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaEventsTopic)
+	defer func() { _ = publisher.Close() }()
+	metrics := observability.NewPrometheusRecorder()
+	service := job.NewService(repo, cfg.JobDefaultMaxRetries, cfg.JobDefaultBackoffSeconds, int(cfg.JobDefaultTimeout.Seconds())).WithPublisher(publisher).WithMetrics(metrics)
 	handler := job.NewHandler(service)
+	registry := worker.NewRedisRegistry(redisClient)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.APIPort,
-		Handler:           server.New(log, db, handler),
+		Handler:           server.New(log, db, handler, registry, metrics),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

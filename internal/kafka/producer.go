@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/bhanuteja/distributed-job-scheduler/internal/events"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -15,7 +16,7 @@ func NewProducer(brokers []string, topic string) *Producer {
 	return &Producer{writer: &kafka.Writer{Addr: kafka.TCP(brokers...), Topic: topic, Balancer: &kafka.LeastBytes{}}}
 }
 
-func (p *Producer) Publish(ctx context.Context, event Event) error {
+func (p *Producer) Publish(ctx context.Context, event events.Event) error {
 	body, err := json.Marshal(event)
 	if err != nil {
 		return err
