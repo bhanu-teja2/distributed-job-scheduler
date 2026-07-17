@@ -43,7 +43,8 @@ jobs:
       - working-directory: web
         run: npm run build
       - name: Parse OpenAPI document
-        run: ruby -e 'require "yaml"; YAML.load_file("docs/openapi.yaml", aliases: true)'
+        run: |
+          ruby -e 'require "yaml"; YAML.load_file("docs/openapi.yaml")'
 
   deployment:
     runs-on: ubuntu-latest
