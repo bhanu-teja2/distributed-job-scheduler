@@ -1,5 +1,25 @@
 # Worker Coordination
 
+Claims now create their `RUNNING` attempt and `job.started` event in the same transaction. During execution the worker renews both the PostgreSQL ownership deadline and owner-checked Redis TTL. Losing either lease cancels the handler context.
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant P as PostgreSQL
+    participant R as Redis
+    participant H as Webhook target
+    W->>P: Claim due rows SKIP LOCKED
+    P-->>W: Jobs + running attempts
+    W->>R: SET NX lock owner TTL
+    loop While executing
+        W->>P: Extend locked_until if owner
+        W->>R: Extend TTL if owner
+    end
+    W->>H: HTTP request with idempotency key
+    W->>P: Commit attempt + outcome + events
+    W->>R: Owner-checked release
+```
+
 PostgreSQL is the primary duplicate-execution guard. Redis adds an execution lock after a job is claimed.
 
 ## Claim and Execute

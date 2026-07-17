@@ -68,7 +68,7 @@ func CanTransition(from, to string) bool {
 
 func DecideFailure(now time.Time, retryCount, maxRetries, retryBackoffSeconds int) FailureDecision {
 	nextRetryCount := retryCount + 1
-	if nextRetryCount >= maxRetries {
+	if nextRetryCount > maxRetries {
 		return FailureDecision{Status: StatusDeadLettered, NextRetryCount: nextRetryCount}
 	}
 	return FailureDecision{

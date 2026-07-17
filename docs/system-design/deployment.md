@@ -1,5 +1,23 @@
 # Deployment Design
 
+```mermaid
+flowchart TB
+    Ingress["Ingress"] --> Dashboard["Dashboard Deployment"]
+    Ingress --> API["API Deployment + HPA"]
+    API --> PG[("External PostgreSQL")]
+    API --> Redis[("External Redis")]
+    Workers["Worker Deployment + HPA"] --> PG
+    Workers --> Redis
+    Relay["Event Relay Deployment"] --> PG
+    Relay --> Kafka[("External Kafka")]
+    Migration["Explicit Migration Job"] --> PG
+    Prometheus["Prometheus"] -. scrape .-> API
+    Prometheus -. scrape .-> Workers
+    Prometheus -. scrape .-> Relay
+```
+
+The chart supports an externally managed Secret, non-root containers, read-only root filesystems, health probes, resource requests/limits, disruption budgets, optional autoscaling, and a packaged migration image.
+
 The project supports Docker Compose for local development and Helm for Kubernetes deployment.
 
 ## Docker Compose

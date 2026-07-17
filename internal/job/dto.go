@@ -14,19 +14,24 @@ type CreateRequest struct {
 	MaxRetries          int             `json:"max_retries"`
 	RetryBackoffSeconds int             `json:"retry_backoff_seconds"`
 	TimeoutSeconds      int             `json:"timeout_seconds"`
-	CreatedBy           string          `json:"created_by"`
+	IdempotencyKey      string          `json:"-"`
 }
 
 type CreateResponse struct {
-	JobID  string `json:"job_id"`
-	Status Status `json:"status"`
+	JobID    string `json:"job_id"`
+	Status   Status `json:"status"`
+	Replayed bool   `json:"-"`
 }
 
 type ListFilter struct {
-	Status   Status
-	JobType  string
-	Page     int
-	PageSize int
+	Status        Status
+	JobType       string
+	Page          int
+	PageSize      int
+	Sort          string
+	Order         string
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
 }
 
 type Page struct {

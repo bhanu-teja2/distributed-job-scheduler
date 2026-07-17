@@ -8,12 +8,7 @@ import (
 )
 
 var supportedJobTypes = map[string]struct{}{
-	"SEND_EMAIL":               {},
-	"CALL_WEBHOOK":             {},
-	"GENERATE_REPORT":          {},
-	"PROCESS_PAYMENT_RETRY":    {},
-	"SYNC_CUSTOMER_DATA":       {},
-	"CLEANUP_EXPIRED_SESSIONS": {},
+	"CALL_WEBHOOK": {},
 }
 
 func validateCreate(req CreateRequest) error {

@@ -2,11 +2,13 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/bhanuteja/distributed-job-scheduler/internal/events"
+	appErrors "github.com/bhanuteja/distributed-job-scheduler/internal/errors"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/job"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/observability"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/scheduler"
@@ -15,12 +17,16 @@ import (
 )
 
 type ExecutorInterface interface {
-	Execute(ctx context.Context, j job.Job) error
+	Execute(ctx context.Context, j job.Job) (json.RawMessage, error)
 }
 
 type LockManager interface {
 	Acquire(ctx context.Context, key, owner string, ttl time.Duration) (bool, error)
 	Release(ctx context.Context, key, owner string) (bool, error)
+}
+
+type renewableLockManager interface {
+	Extend(context.Context, string, string, time.Duration) (bool, error)
 }
 
 type Service struct {
@@ -33,7 +39,6 @@ type Service struct {
 	pollInterval      time.Duration
 	lockTTL           time.Duration
 	lockManager       LockManager
-	publisher         events.Publisher
 	metrics           observability.Recorder
 	registry          Registry
 	heartbeatTTL      time.Duration
@@ -50,19 +55,12 @@ func NewService(repo job.Repository, executor ExecutorInterface, log *zap.Logger
 	if batchSize < 1 {
 		batchSize = 1
 	}
-	return &Service{repo: repo, executor: executor, log: log, workerID: workerID, concurrency: concurrency, batchSize: batchSize, pollInterval: pollInterval, lockTTL: lockTTL, lockManager: noopLockManager{}, publisher: events.NoopPublisher{}, metrics: observability.NoopRecorder{}, registry: NoopRegistry{}, heartbeatTTL: 30 * time.Second, heartbeatInterval: 10 * time.Second}
+	return &Service{repo: repo, executor: executor, log: log, workerID: workerID, concurrency: concurrency, batchSize: batchSize, pollInterval: pollInterval, lockTTL: lockTTL, lockManager: noopLockManager{}, metrics: observability.NoopRecorder{}, registry: NoopRegistry{}, heartbeatTTL: 30 * time.Second, heartbeatInterval: 10 * time.Second}
 }
 
 func (s *Service) WithLockManager(lockManager LockManager) *Service {
 	if lockManager != nil {
 		s.lockManager = lockManager
-	}
-	return s
-}
-
-func (s *Service) WithPublisher(publisher events.Publisher) *Service {
-	if publisher != nil {
-		s.publisher = publisher
 	}
 	return s
 }
@@ -113,6 +111,11 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			if recovered, err := s.repo.RecoverExpiredRunningJobs(ctx, "worker lease expired before completion"); err != nil {
+				s.log.Error("failed to recover expired jobs", zap.Error(err))
+			} else if recovered > 0 {
+				s.log.Warn("recovered expired jobs", zap.Int64("count", recovered))
+			}
 			claimed, err := s.repo.ClaimDueJobs(ctx, s.workerID, s.batchSize, s.lockTTL)
 			if err != nil {
 				s.log.Error("failed to claim due jobs", zap.Error(err))
@@ -163,7 +166,11 @@ func (s *Service) consume(ctx context.Context, jobs <-chan job.Job, slot int) {
 
 func (s *Service) ProcessJob(ctx context.Context, j job.Job) error {
 	lockKey := "lock:job:" + j.ID.String()
-	acquired, err := s.lockManager.Acquire(ctx, lockKey, s.workerID, time.Duration(j.TimeoutSeconds+60)*time.Second)
+	leaseTTL := s.lockTTL
+	if leaseTTL <= 0 {
+		leaseTTL = time.Duration(j.TimeoutSeconds+60) * time.Second
+	}
+	acquired, err := s.lockManager.Acquire(ctx, lockKey, s.workerID, leaseTTL)
 	if err != nil {
 		return fmt.Errorf("acquire redis lock: %w", err)
 	}
@@ -180,12 +187,14 @@ func (s *Service) ProcessJob(ctx context.Context, j job.Job) error {
 		}
 	}()
 
-	attemptNumber := j.RetryCount + 1
-	attempt, err := s.repo.CreateAttempt(ctx, j.ID, s.workerID, attemptNumber)
-	if err != nil {
-		return fmt.Errorf("create attempt: %w", err)
+	if j.ActiveAttemptID == uuid.Nil {
+		attempt, err := s.repo.CreateAttempt(ctx, j.ID, s.workerID, j.RetryCount+1)
+		if err != nil {
+			return fmt.Errorf("create attempt: %w", err)
+		}
+		j.ActiveAttemptID = attempt.ID
+		j.AttemptNumber = j.RetryCount + 1
 	}
-	_ = s.publisher.Publish(ctx, events.New(events.JobStarted, "worker", "job", j.ID.String(), map[string]any{"worker_id": s.workerID, "attempt_number": attemptNumber}))
 
 	started := time.Now()
 	timeout := time.Duration(j.TimeoutSeconds) * time.Second
@@ -194,42 +203,74 @@ func (s *Service) ProcessJob(ctx context.Context, j job.Job) error {
 	}
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	leaseDone := make(chan struct{})
+	go s.renewLease(execCtx, cancel, leaseDone, lockKey, j.ID, leaseTTL)
 
-	err = s.executor.Execute(execCtx, j)
+	result, err := s.executor.Execute(execCtx, j)
+	cancel()
+	<-leaseDone
 	duration := time.Since(started)
 	if err == nil {
-		if completeErr := s.repo.CompleteAttempt(ctx, attempt.ID, duration); completeErr != nil {
-			return fmt.Errorf("complete attempt: %w", completeErr)
-		}
-		if successErr := s.repo.MarkSucceededByWorker(ctx, j.ID, s.workerID); successErr != nil {
+		if successErr := s.repo.CompleteExecution(ctx, j, s.workerID, duration, result); successErr != nil {
 			return fmt.Errorf("mark succeeded: %w", successErr)
 		}
 		s.metrics.JobCompleted(j.JobType, duration)
-		_ = s.publisher.Publish(ctx, events.New(events.JobCompleted, "worker", "job", j.ID.String(), map[string]any{"worker_id": s.workerID, "execution_duration_ms": duration.Milliseconds()}))
 		return nil
 	}
 
-	message := err.Error()
-	if failErr := s.repo.FailAttempt(ctx, attempt.ID, duration, message); failErr != nil {
-		return fmt.Errorf("fail attempt: %w", failErr)
-	}
+	outcome := ClassifyError(err)
 	s.metrics.JobFailed(j.JobType)
-	_ = s.publisher.Publish(ctx, events.New(events.JobFailed, "worker", "job", j.ID.String(), map[string]any{"worker_id": s.workerID, "attempt_number": attemptNumber, "error": message}))
 
 	decision := scheduler.DecideFailure(time.Now().UTC(), j.RetryCount, j.MaxRetries, j.RetryBackoffSeconds)
-	if decision.Status == scheduler.StatusDeadLettered {
-		if dlqErr := s.repo.MoveToDeadLetterByWorker(ctx, j, s.workerID, message, decision.NextRetryCount); dlqErr != nil {
-			return fmt.Errorf("move to dead letter: %w", dlqErr)
+	if delay := retryAfter(err); delay > 0 {
+		decision.NextRunAt = time.Now().UTC().Add(delay)
+	}
+	nextStatus := job.StatusRetryScheduled
+	if decision.Status == scheduler.StatusDeadLettered || !outcome.Retryable {
+		nextStatus = job.StatusDeadLettered
+	}
+	if failErr := s.repo.FailExecution(ctx, j, s.workerID, duration, outcome, nextStatus, decision.NextRetryCount, decision.NextRunAt); failErr != nil {
+		if errors.Is(err, context.Canceled) && errors.Is(failErr, appErrors.ErrConflict) {
+			return nil
 		}
+		return fmt.Errorf("finalize failed execution: %w", failErr)
+	}
+	if nextStatus == job.StatusDeadLettered {
 		s.metrics.JobDeadLettered(j.JobType)
-		_ = s.publisher.Publish(ctx, events.New(events.JobDeadLettered, "worker", "job", j.ID.String(), map[string]any{"worker_id": s.workerID, "retry_count": decision.NextRetryCount, "final_error": message}))
-		return nil
 	}
-	if retryErr := s.repo.MarkFailedForRetryByWorker(ctx, j, s.workerID, message, decision.NextRetryCount, decision.NextRunAt); retryErr != nil {
-		return fmt.Errorf("schedule retry: %w", retryErr)
-	}
-	_ = s.publisher.Publish(ctx, events.New(events.JobRetryScheduled, "worker", "job", j.ID.String(), map[string]any{"worker_id": s.workerID, "retry_count": decision.NextRetryCount, "next_run_at": decision.NextRunAt}))
 	return nil
+}
+
+func (s *Service) renewLease(ctx context.Context, cancel context.CancelFunc, done chan<- struct{}, lockKey string, jobID uuid.UUID, ttl time.Duration) {
+	defer close(done)
+	interval := ttl / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ok, err := s.repo.ExtendLease(ctx, jobID, s.workerID, ttl)
+			if err != nil || !ok {
+				cancel()
+				return
+			}
+			if lockManager, ok := s.lockManager.(renewableLockManager); ok {
+				extended, err := lockManager.Extend(ctx, lockKey, s.workerID, ttl)
+				if err != nil || !extended {
+					cancel()
+					return
+				}
+			}
+		}
+	}
 }
 
 type noopLockManager struct{}

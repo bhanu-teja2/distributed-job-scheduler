@@ -1,0 +1,51 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scheduler.fullname" . }}-dashboard
+  labels:
+    {{- include "scheduler.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  replicas: {{ .Values.dashboard.replicas }}
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: dashboard}
+  template:
+    metadata:
+      labels:
+        {{- include "scheduler.labels" . | nindent 8 }}
+        app.kubernetes.io/component: dashboard
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: dashboard
+          image: "{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag }}"
+          imagePullPolicy: {{ .Values.dashboard.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - {name: http, containerPort: {{ .Values.dashboard.port }}}
+          readinessProbe: {httpGet: {path: /, port: http}, initialDelaySeconds: 3}
+          livenessProbe: {httpGet: {path: /, port: http}, initialDelaySeconds: 10}
+          resources:
+            {{- toYaml .Values.dashboard.resources | nindent 12 }}
+          volumeMounts:
+            - {name: cache, mountPath: /var/cache/nginx}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: cache, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "scheduler.fullname" . }}-dashboard
+  labels:
+    {{- include "scheduler.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: dashboard}
+  ports:
+    - {name: http, port: {{ .Values.dashboard.port }}, targetPort: http}
+{{- end }}

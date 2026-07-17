@@ -4,6 +4,9 @@
 
 bin/
 dist/
+node_modules/
+*.tsbuildinfo
+.playwright-cli/
 coverage.out
 /api
 /worker
@@ -16,3 +19,4 @@ coverage.out
 
 tmp/
 *.log
+.cache/

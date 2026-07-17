@@ -68,7 +68,7 @@ func TestRetryDecisionSchedulesNextAttemptBeforeMaxRetries(t *testing.T) {
 
 func TestRetryDecisionDeadLettersWhenMaxRetriesExhausted(t *testing.T) {
 	now := time.Date(2026, 7, 2, 10, 0, 0, 0, time.UTC)
-	decision := DecideFailure(now, 2, 3, 30)
+	decision := DecideFailure(now, 3, 3, 30)
 
 	if decision.Status != StatusDeadLettered {
 		t.Fatalf("expected dead lettered, got %s", decision.Status)

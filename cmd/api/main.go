@@ -9,11 +9,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bhanuteja/distributed-job-scheduler/internal/auth"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/config"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/job"
-	"github.com/bhanuteja/distributed-job-scheduler/internal/kafka"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/logger"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/observability"
+	"github.com/bhanuteja/distributed-job-scheduler/internal/outbox"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/postgres"
 	appRedis "github.com/bhanuteja/distributed-job-scheduler/internal/redis"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/server"
@@ -44,16 +45,14 @@ func main() {
 	defer func() { _ = redisClient.Close() }()
 
 	repo := job.NewPostgresRepository(db)
-	publisher := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaEventsTopic)
-	defer func() { _ = publisher.Close() }()
 	metrics := observability.NewPrometheusRecorder()
-	service := job.NewService(repo, cfg.JobDefaultMaxRetries, cfg.JobDefaultBackoffSeconds, int(cfg.JobDefaultTimeout.Seconds())).WithPublisher(publisher).WithMetrics(metrics)
+	service := job.NewService(repo, cfg.JobDefaultMaxRetries, cfg.JobDefaultBackoffSeconds, int(cfg.JobDefaultTimeout.Seconds())).WithMetrics(metrics)
 	handler := job.NewHandler(service)
 	registry := worker.NewRedisRegistry(redisClient)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.APIPort,
-		Handler:           server.New(log, db, handler, registry, metrics),
+		Handler:           server.New(log, db, handler, registry, metrics, server.Options{Authenticator: auth.NewStore(db), AuthEnabled: cfg.AuthEnabled, RateLimiter: auth.NewRateLimiter(redisClient, cfg.RateLimitPerMinute), AllowedOrigins: cfg.CORSAllowedOrigins, Outbox: outbox.NewStore(db), ReadyChecks: []func(context.Context) error{func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }}}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

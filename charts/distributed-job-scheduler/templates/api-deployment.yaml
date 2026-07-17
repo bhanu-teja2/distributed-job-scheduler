@@ -18,8 +18,12 @@ spec:
         app.kubernetes.io/component: api
     spec:
       serviceAccountName: {{ include "scheduler.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: api
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           ports:
@@ -29,7 +33,7 @@ spec:
             - configMapRef:
                 name: {{ include "scheduler.fullname" . }}-config
             - secretRef:
-                name: {{ include "scheduler.fullname" . }}-secret
+                name: {{ include "scheduler.secretName" . }}
           readinessProbe:
             httpGet:
               path: /ready

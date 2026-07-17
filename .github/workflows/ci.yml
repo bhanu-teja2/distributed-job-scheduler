@@ -1,37 +1,65 @@
-name: Go CI
+name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  push: {branches: [main]}
+  pull_request: {branches: [main]}
 
 jobs:
-  test:
+  backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.4"
-      - uses: Azure/setup-helm@v5.0.1
+        with: {go-version: "1.26.4", cache: true}
       - name: Format check
-        run: |
-          gofmt -w .
-          git diff --exit-code
-      - name: Test
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
         run: go test ./...
-      - name: Race test
+      - name: Race tests
         run: go test -race ./...
-      - name: Build API
-        run: go build ./cmd/api
-      - name: Build worker
-        run: go build ./cmd/worker
-      - name: Docker build API
-        run: docker build -f Dockerfile.api .
-      - name: Docker build worker
-        run: docker build -f Dockerfile.worker .
+      - name: Integration tests
+        run: go test -tags=integration -count=1 -timeout=10m ./tests/integration
+      - name: Build binaries
+        run: go build ./cmd/api ./cmd/worker ./cmd/event-relay ./cmd/scheduler-admin
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with: {node-version: "24", cache: npm, cache-dependency-path: web/package-lock.json}
+      - working-directory: web
+        run: npm ci
+      - working-directory: web
+        run: npm audit --audit-level=high
+      - working-directory: web
+        run: npm run lint
+      - working-directory: web
+        run: npm test
+      - working-directory: web
+        run: npm run build
+      - name: Parse OpenAPI document
+        run: ruby -e 'require "yaml"; YAML.load_file("docs/openapi.yaml", aliases: true)'
+
+  deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Azure/setup-helm@v5.0.1
+      - name: Compose validation
+        run: docker compose config --quiet
+      - name: Docker images
+        run: |
+          docker build -f Dockerfile.api .
+          docker build -f Dockerfile.worker .
+          docker build -f Dockerfile.relay .
+          docker build -f Dockerfile.migrate .
+          docker build -f web/Dockerfile web
       - name: Helm lint
         run: helm lint charts/distributed-job-scheduler
-      - name: Helm template
-        run: helm template scheduler charts/distributed-job-scheduler
+      - name: Helm render
+        run: helm template scheduler charts/distributed-job-scheduler --set migrations.enabled=true --set existingSecret=scheduler-production-secrets

@@ -16,9 +16,9 @@ func TestServiceCreateAppliesDefaultsAndScheduledStatus(t *testing.T) {
 	service.now = func() time.Time { return fixedNow }
 
 	resp, err := service.Create(context.Background(), CreateRequest{
-		Name:    "send email",
-		JobType: "SEND_EMAIL",
-		Payload: json.RawMessage(`{"to":"user@example.com","subject":"Welcome"}`),
+		Name:    "call webhook",
+		JobType: "CALL_WEBHOOK",
+		Payload: json.RawMessage(`{"url":"https://example.com/hook"}`),
 		RunAt:   fixedNow.Add(time.Minute),
 	})
 
@@ -104,18 +104,18 @@ func (f *fakeRepo) Create(ctx context.Context, j Job) (Job, error) {
 	return j, nil
 }
 
-func (f *fakeRepo) List(ctx context.Context, filter ListFilter) (Page, error) {
+func (f *fakeRepo) List(ctx context.Context, tenantID uuid.UUID, filter ListFilter) (Page, error) {
 	return Page{}, nil
 }
 
-func (f *fakeRepo) GetByID(ctx context.Context, id uuid.UUID) (Job, error) {
+func (f *fakeRepo) GetByID(ctx context.Context, tenantID, id uuid.UUID) (Job, error) {
 	if f.existing.ID != uuid.Nil {
 		return f.existing, nil
 	}
 	return Job{ID: id, Status: StatusPending}, nil
 }
 
-func (f *fakeRepo) TransitionJob(ctx context.Context, id uuid.UUID, from []Status, to Status) error {
+func (f *fakeRepo) TransitionJob(ctx context.Context, tenantID, id uuid.UUID, from []Status, to Status) error {
 	f.transitionTo = to
 	return nil
 }

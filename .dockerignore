@@ -1,7 +1,12 @@
 .git/
 .gocache/
 .gomodcache/
+node_modules/
+web/node_modules/
+web/dist/
+.playwright-cli/
 api
 worker
 .env
 *.log
+.cache

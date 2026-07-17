@@ -2,6 +2,10 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "scheduler.secretName" -}}
+{{- default (printf "%s-secret" (include "scheduler.fullname" .)) .Values.existingSecret -}}
+{{- end -}}
+
 {{- define "scheduler.fullname" -}}
 {{- printf "%s-%s" .Release.Name (include "scheduler.name" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

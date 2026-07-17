@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 
 func TestProcessJobMarksSucceededWhenExecutorSucceeds(t *testing.T) {
 	repo := &workerRepo{}
-	executor := executorFunc(func(ctx context.Context, j job.Job) error { return nil })
+	executor := executorFunc(func(ctx context.Context, j job.Job) (json.RawMessage, error) { return nil, nil })
 	service := NewService(repo, executor, zap.NewNop(), "worker-1", 1, 1, time.Second, time.Minute)
 	j := newWorkerTestJob()
 
@@ -31,9 +32,9 @@ func TestProcessJobMarksSucceededWhenExecutorSucceeds(t *testing.T) {
 func TestProcessJobReleasesClaimWhenLockAcquireFails(t *testing.T) {
 	repo := &workerRepo{}
 	executed := false
-	executor := executorFunc(func(ctx context.Context, j job.Job) error {
+	executor := executorFunc(func(ctx context.Context, j job.Job) (json.RawMessage, error) {
 		executed = true
-		return nil
+		return nil, nil
 	})
 	service := NewService(repo, executor, zap.NewNop(), "worker-1", 1, 1, time.Second, time.Minute)
 	service.lockManager = lockFunc(func(ctx context.Context, key, owner string, ttl time.Duration) (bool, error) {
@@ -54,7 +55,7 @@ func TestProcessJobReleasesClaimWhenLockAcquireFails(t *testing.T) {
 
 func TestProcessJobSchedulesRetryWhenExecutorFailsBelowMaxRetries(t *testing.T) {
 	repo := &workerRepo{}
-	executor := executorFunc(func(ctx context.Context, j job.Job) error { return errors.New("boom") })
+	executor := executorFunc(func(ctx context.Context, j job.Job) (json.RawMessage, error) { return nil, errors.New("boom") })
 	service := NewService(repo, executor, zap.NewNop(), "worker-1", 1, 1, time.Second, time.Minute)
 	j := newWorkerTestJob()
 	j.RetryCount = 0
@@ -76,10 +77,10 @@ func TestProcessJobSchedulesRetryWhenExecutorFailsBelowMaxRetries(t *testing.T) 
 
 func TestProcessJobMovesToDeadLetterWhenRetriesExhausted(t *testing.T) {
 	repo := &workerRepo{}
-	executor := executorFunc(func(ctx context.Context, j job.Job) error { return errors.New("boom") })
+	executor := executorFunc(func(ctx context.Context, j job.Job) (json.RawMessage, error) { return nil, errors.New("boom") })
 	service := NewService(repo, executor, zap.NewNop(), "worker-1", 1, 1, time.Second, time.Minute)
 	j := newWorkerTestJob()
-	j.RetryCount = 2
+	j.RetryCount = 3
 	j.MaxRetries = 3
 
 	if err := service.ProcessJob(context.Background(), j); err != nil {
@@ -90,9 +91,9 @@ func TestProcessJobMovesToDeadLetterWhenRetriesExhausted(t *testing.T) {
 	}
 }
 
-type executorFunc func(ctx context.Context, j job.Job) error
+type executorFunc func(ctx context.Context, j job.Job) (json.RawMessage, error)
 
-func (f executorFunc) Execute(ctx context.Context, j job.Job) error {
+func (f executorFunc) Execute(ctx context.Context, j job.Job) (json.RawMessage, error) {
 	return f(ctx, j)
 }
 
@@ -114,6 +115,24 @@ type workerRepo struct {
 	retryJobID       uuid.UUID
 	deadLetterJobID  uuid.UUID
 	releasedJobID    uuid.UUID
+}
+
+func (w *workerRepo) CompleteExecution(ctx context.Context, j job.Job, workerID string, duration time.Duration, result json.RawMessage) error {
+	w.completedAttempt = true
+	w.succeededJobID = j.ID
+	return nil
+}
+func (w *workerRepo) FailExecution(ctx context.Context, j job.Job, workerID string, duration time.Duration, outcome job.ExecutionResult, nextStatus job.Status, nextRetryCount int, nextRunAt time.Time) error {
+	w.failedAttempt = true
+	if nextStatus == job.StatusDeadLettered {
+		w.deadLetterJobID = j.ID
+	} else {
+		w.retryJobID = j.ID
+	}
+	return nil
+}
+func (w *workerRepo) ExtendLease(ctx context.Context, jobID uuid.UUID, workerID string, ttl time.Duration) (bool, error) {
+	return true, nil
 }
 
 func (w *workerRepo) CreateAttempt(ctx context.Context, jobID uuid.UUID, workerID string, attemptNumber int) (job.Attempt, error) {
@@ -169,8 +188,8 @@ func newWorkerTestJob() job.Job {
 	return job.Job{
 		ID:                  uuid.New(),
 		Name:                "test",
-		JobType:             "SEND_EMAIL",
-		Payload:             []byte(`{"to":"user@example.com","subject":"Welcome"}`),
+		JobType:             "CALL_WEBHOOK",
+		Payload:             []byte(`{"url":"https://example.com/hook"}`),
 		Status:              job.StatusRunning,
 		Priority:            5,
 		RunAt:               time.Now().UTC(),

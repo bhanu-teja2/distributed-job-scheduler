@@ -2,12 +2,16 @@ package job
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
+	"github.com/bhanuteja/distributed-job-scheduler/internal/auth"
 	appErrors "github.com/bhanuteja/distributed-job-scheduler/internal/errors"
-	"github.com/bhanuteja/distributed-job-scheduler/internal/events"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/observability"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/scheduler"
 	"github.com/google/uuid"
@@ -19,7 +23,6 @@ type Service struct {
 	defaultRetries    int
 	defaultBackoffSec int
 	defaultTimeoutSec int
-	publisher         events.Publisher
 	metrics           observability.Recorder
 }
 
@@ -30,16 +33,8 @@ func NewService(repo Repository, defaultRetries, defaultBackoffSec, defaultTimeo
 		defaultRetries:    defaultRetries,
 		defaultBackoffSec: defaultBackoffSec,
 		defaultTimeoutSec: defaultTimeoutSec,
-		publisher:         events.NoopPublisher{},
 		metrics:           observability.NoopRecorder{},
 	}
-}
-
-func (s *Service) WithPublisher(publisher events.Publisher) *Service {
-	if publisher != nil {
-		s.publisher = publisher
-	}
-	return s
 }
 
 func (s *Service) WithMetrics(metrics observability.Recorder) *Service {
@@ -51,16 +46,35 @@ func (s *Service) WithMetrics(metrics observability.Recorder) *Service {
 
 func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResponse, error) {
 	req = s.withDefaults(req)
+	req.IdempotencyKey = strings.TrimSpace(req.IdempotencyKey)
+	if len(req.IdempotencyKey) > 255 {
+		return CreateResponse{}, fmt.Errorf("%w: Idempotency-Key exceeds 255 characters", appErrors.ErrInvalidInput)
+	}
 	if err := validateCreate(req); err != nil {
 		return CreateResponse{}, fmt.Errorf("%w: %s", appErrors.ErrInvalidInput, err.Error())
 	}
 
-	var createdBy *string
-	if req.CreatedBy != "" {
-		createdBy = &req.CreatedBy
+	principal := auth.PrincipalOrDefault(ctx)
+	createdBy := principal.ClientName
+	requestBytes, _ := json.Marshal(struct {
+		Name                string          `json:"name"`
+		JobType             string          `json:"job_type"`
+		Payload             json.RawMessage `json:"payload"`
+		RunAt               time.Time       `json:"run_at"`
+		Priority            int             `json:"priority"`
+		MaxRetries          int             `json:"max_retries"`
+		RetryBackoffSeconds int             `json:"retry_backoff_seconds"`
+		TimeoutSeconds      int             `json:"timeout_seconds"`
+	}{req.Name, req.JobType, req.Payload, req.RunAt.UTC(), req.Priority, req.MaxRetries, req.RetryBackoffSeconds, req.TimeoutSeconds})
+	sum := sha256.Sum256(requestBytes)
+	requestHash := hex.EncodeToString(sum[:])
+	var idempotencyKey *string
+	if req.IdempotencyKey != "" {
+		idempotencyKey = &req.IdempotencyKey
 	}
 	j := Job{
 		ID:                  uuid.New(),
+		TenantID:            principal.TenantID,
 		Name:                req.Name,
 		JobType:             req.JobType,
 		Payload:             req.Payload,
@@ -70,7 +84,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResponse
 		MaxRetries:          req.MaxRetries,
 		RetryBackoffSeconds: req.RetryBackoffSeconds,
 		TimeoutSeconds:      req.TimeoutSeconds,
-		CreatedBy:           createdBy,
+		CreatedBy:           &createdBy,
+		IdempotencyKey:      idempotencyKey,
+		RequestHash:         &requestHash,
 	}
 
 	inserted, err := s.repo.Create(ctx, j)
@@ -78,8 +94,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResponse
 		return CreateResponse{}, err
 	}
 	s.metrics.JobCreated(inserted.JobType)
-	_ = s.publisher.Publish(ctx, events.New(events.JobCreated, "scheduler-api", "job", inserted.ID.String(), map[string]any{"job_id": inserted.ID.String(), "job_type": inserted.JobType, "status": inserted.Status, "run_at": inserted.RunAt, "priority": inserted.Priority}))
-	return CreateResponse{JobID: inserted.ID.String(), Status: inserted.Status}, nil
+	replayed := inserted.ID != j.ID
+	return CreateResponse{JobID: inserted.ID.String(), Status: inserted.Status, Replayed: replayed}, nil
 }
 
 func (s *Service) List(ctx context.Context, filter ListFilter) (Page, error) {
@@ -89,30 +105,49 @@ func (s *Service) List(ctx context.Context, filter ListFilter) (Page, error) {
 	if filter.JobType != "" && !isSupportedJobType(filter.JobType) {
 		return Page{}, fmt.Errorf("%w: unsupported job_type filter", appErrors.ErrInvalidInput)
 	}
-	return s.repo.List(ctx, filter)
+	if filter.Sort == "" {
+		filter.Sort = "created_at"
+	}
+	if filter.Order == "" {
+		filter.Order = "desc"
+	}
+	if filter.Sort != "created_at" && filter.Sort != "run_at" && filter.Sort != "priority" {
+		return Page{}, fmt.Errorf("%w: unsupported sort", appErrors.ErrInvalidInput)
+	}
+	if filter.Order != "asc" && filter.Order != "desc" {
+		return Page{}, fmt.Errorf("%w: unsupported order", appErrors.ErrInvalidInput)
+	}
+	if filter.CreatedAfter != nil && filter.CreatedBefore != nil && filter.CreatedAfter.After(*filter.CreatedBefore) {
+		return Page{}, fmt.Errorf("%w: created_after must not be after created_before", appErrors.ErrInvalidInput)
+	}
+	return s.repo.List(ctx, auth.PrincipalOrDefault(ctx).TenantID, filter)
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Job, error) {
-	return s.repo.GetByID(ctx, id)
+	return s.repo.GetByID(ctx, auth.PrincipalOrDefault(ctx).TenantID, id)
 }
 
 func (s *Service) Attempts(ctx context.Context, id uuid.UUID) ([]Attempt, error) {
-	return s.repo.ListAttempts(ctx, id)
+	return s.repo.ListAttempts(ctx, auth.PrincipalOrDefault(ctx).TenantID, id)
+
+}
+
+func (s *Service) Events(ctx context.Context, id uuid.UUID) ([]Event, error) {
+	return s.repo.ListEvents(ctx, auth.PrincipalOrDefault(ctx).TenantID, id)
 }
 
 func (s *Service) ListDeadLetters(ctx context.Context, page, pageSize int) ([]DeadLetterJob, error) {
-	return s.repo.ListDeadLetters(ctx, page, pageSize)
+	return s.repo.ListDeadLetters(ctx, auth.PrincipalOrDefault(ctx).TenantID, page, pageSize)
 }
 
 func (s *Service) RequeueDeadLetter(ctx context.Context, deadLetterID uuid.UUID) (Job, error) {
-	return s.repo.RequeueDeadLetter(ctx, deadLetterID, s.now())
+	return s.repo.RequeueDeadLetter(ctx, auth.PrincipalOrDefault(ctx).TenantID, deadLetterID, s.now())
 }
 
 func (s *Service) Cancel(ctx context.Context, id uuid.UUID) error {
 	if err := s.transition(ctx, id, StatusCancelled, []Status{StatusPending, StatusScheduled, StatusRetryScheduled, StatusRunning}); err != nil {
 		return err
 	}
-	_ = s.publisher.Publish(ctx, events.New(events.JobCancelled, "scheduler-api", "job", id.String(), map[string]any{"job_id": id.String()}))
 	return nil
 }
 
@@ -125,11 +160,12 @@ func (s *Service) Resume(ctx context.Context, id uuid.UUID) error {
 }
 
 func (s *Service) Retry(ctx context.Context, id uuid.UUID) error {
-	return s.transition(ctx, id, StatusRetryScheduled, []Status{StatusFailed, StatusDeadLettered})
+	return s.transition(ctx, id, StatusRetryScheduled, []Status{StatusFailed})
 }
 
 func (s *Service) transition(ctx context.Context, id uuid.UUID, to Status, allowedFrom []Status) error {
-	current, err := s.repo.GetByID(ctx, id)
+	tenantID := auth.PrincipalOrDefault(ctx).TenantID
+	current, err := s.repo.GetByID(ctx, tenantID, id)
 	if err != nil {
 		return err
 	}
@@ -143,7 +179,7 @@ func (s *Service) transition(ctx context.Context, id uuid.UUID, to Status, allow
 	if !allowed || !scheduler.CanTransition(string(current.Status), string(to)) {
 		return fmt.Errorf("%w: cannot transition %s to %s", appErrors.ErrInvalidTransition, current.Status, to)
 	}
-	return s.repo.TransitionJob(ctx, id, allowedFrom, to)
+	return s.repo.TransitionJob(ctx, tenantID, id, allowedFrom, to)
 }
 
 func (s *Service) withDefaults(req CreateRequest) CreateRequest {

@@ -4,9 +4,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/scheduler-admin ./cmd/scheduler-admin
 
 FROM alpine:3.20
+RUN addgroup -S scheduler && adduser -S -G scheduler scheduler
 WORKDIR /app
 COPY --from=build /out/api /app/api
+COPY --from=build /out/scheduler-admin /app/scheduler-admin
 EXPOSE 8080
+USER scheduler
 ENTRYPOINT ["/app/api"]

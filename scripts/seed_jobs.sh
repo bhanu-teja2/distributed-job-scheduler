@@ -1,14 +1,6 @@
 #!/usr/bin/env sh
 set -eu
-
 : "${API_URL:=http://localhost:8080}"
-
-curl -sS -X POST "$API_URL/api/v1/jobs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Send welcome email",
-    "job_type": "SEND_EMAIL",
-    "payload": {"to":"user@example.com","subject":"Welcome","body":"Hello from the scheduler"},
-    "run_at": "2026-07-01T12:00:00Z",
-    "priority": 5
-  }'
+: "${API_KEY:=djs_local_development_key_change_me}"
+RUN_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+curl -sS -X POST "$API_URL/api/v1/jobs" -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -H "Idempotency-Key: seed-webhook-1" -d "{\"name\":\"Seed webhook\",\"job_type\":\"CALL_WEBHOOK\",\"payload\":{\"url\":\"http://webhook-sink:8080/seed\",\"method\":\"POST\",\"body\":{\"source\":\"seed\"}},\"run_at\":\"$RUN_AT\",\"priority\":5}"

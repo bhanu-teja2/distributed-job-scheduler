@@ -1,0 +1,12 @@
+{{- if .Values.pdb.enabled }}
+{{- range $component := list "api" "worker" "relay" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ include "scheduler.fullname" $ }}-{{ $component }}}
+spec:
+  minAvailable: {{ $.Values.pdb.minAvailable }}
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ $.Release.Name }}, app.kubernetes.io/component: {{ $component }}}
+---
+{{- end }}
+{{- end }}

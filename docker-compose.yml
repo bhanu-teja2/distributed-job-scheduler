@@ -1,24 +1,23 @@
+name: distributed-job-scheduler
+
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.4-alpine
     environment:
       POSTGRES_USER: scheduler
       POSTGRES_PASSWORD: scheduler
       POSTGRES_DB: scheduler_db
-    ports:
-      - "5432:5432"
+    ports: ["5432:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U scheduler -d scheduler_db"]
       interval: 5s
       timeout: 5s
       retries: 10
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
 
   redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
+    image: redis:7.2.5-alpine
+    ports: ["6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -33,10 +32,8 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:7.6.1
-    depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -48,37 +45,41 @@ services:
       test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
       interval: 10s
       timeout: 10s
-      retries: 10
+      retries: 15
 
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
     depends_on:
-      - kafka
-    ports:
-      - "8081:8080"
+      postgres: {condition: service_healthy}
+    command: ["-database", "postgres://scheduler:scheduler@postgres:5432/scheduler_db?sslmode=disable", "up"]
+
+  bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    entrypoint: ["/app/scheduler-admin"]
+    command: ["create-api-key", "--name", "local-admin", "--role", "admin", "--key", "${DEV_API_KEY:-djs_local_development_key_change_me}"]
     environment:
-      KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DATABASE_URL: postgres://scheduler:scheduler@postgres:5432/scheduler_db?sslmode=disable
+    depends_on:
+      migrate: {condition: service_completed_successfully}
 
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-    environment:
+      bootstrap: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    environment: &app-environment
       POSTGRES_HOST: postgres
       REDIS_ADDR: redis:6379
-      KAFKA_BROKERS: kafka:29092
-      KAFKA_EVENTS_TOPIC: scheduler.events
-      API_PORT: 8080
-    ports:
-      - "8080:8080"
+      AUTH_ENABLED: "true"
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
+      WEBHOOK_ALLOWED_HOSTS: webhook-sink
+    ports: ["8080:8080"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null"]
       interval: 10s
@@ -90,17 +91,45 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
+      bootstrap: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    environment: *app-environment
+    ports: ["8090:8090"]
+
+  event-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      kafka: {condition: service_healthy}
     environment:
       POSTGRES_HOST: postgres
-      REDIS_ADDR: redis:6379
       KAFKA_BROKERS: kafka:29092
       KAFKA_EVENTS_TOPIC: scheduler.events
+    ports: ["8091:8091"]
+
+  webhook-sink:
+    image: mendhak/http-https-echo:35
+    environment:
+      HTTP_PORT: 8080
+    ports: ["8082:8080"]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    depends_on: [kafka]
+    ports: ["8081:8080"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+
+  dashboard:
+    build:
+      context: web
+      dockerfile: Dockerfile
+    depends_on:
+      api: {condition: service_healthy}
+    ports: ["3000:8080"]
 
 volumes:
   postgres-data:

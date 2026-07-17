@@ -1,8 +1,13 @@
-# Future Improvements
+# Roadmap Beyond the Portfolio Release
 
-- Add Redis locks and worker heartbeat endpoint.
-- Publish Kafka lifecycle events from API and worker state transitions.
-- Add cancel, pause, resume, and manual retry APIs.
-- Add Prometheus metrics.
-- Add integration tests with Docker Compose.
-- Add optional dashboard after the backend MVP is stable.
+The production-style portfolio milestone includes tenancy, API keys, rate limiting, transactional job outcomes, renewable leases, a Kafka outbox relay, a real webhook handler, integration tests, Helm, and an operations dashboard.
+
+Deliberately deferred capabilities:
+
+- Recurring cron schedules and calendar-aware execution.
+- Workflow DAGs, fan-out/fan-in, and dependent jobs.
+- Multi-region active-active scheduling and consensus.
+- OIDC federation and interactive user identity.
+- Kafka schema-registry compatibility enforcement.
+- Long-term event archival and tenant billing/quotas.
+- Provider-specific email, payment, and report handlers.

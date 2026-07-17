@@ -1,63 +1,55 @@
 api:
   replicas: 2
   port: 8080
-  image:
-    repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-api
-    tag: latest
-    pullPolicy: IfNotPresent
-  resources: {}
-
+  image: {repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-api, tag: latest, pullPolicy: IfNotPresent}
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 500m, memory: 256Mi}}
 worker:
   replicas: 2
-  image:
-    repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-worker
-    tag: latest
-    pullPolicy: IfNotPresent
+  healthPort: 8090
+  image: {repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-worker, tag: latest, pullPolicy: IfNotPresent}
   concurrency: 5
   pollIntervalSeconds: 5
   batchSize: 10
-  resources: {}
-
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: "1", memory: 512Mi}}
+relay:
+  replicas: 2
+  healthPort: 8091
+  image: {repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-relay, tag: latest, pullPolicy: IfNotPresent}
+  batchSize: 100
+  pollIntervalSeconds: 1
+  resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 300m, memory: 192Mi}}
+dashboard:
+  enabled: true
+  replicas: 1
+  port: 8080
+  image: {repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-dashboard, tag: latest, pullPolicy: IfNotPresent}
+  resources: {requests: {cpu: 25m, memory: 32Mi}, limits: {cpu: 150m, memory: 96Mi}}
 env:
   appEnv: production
   logLevel: info
+  authEnabled: true
+  corsAllowedOrigins: https://scheduler.example.com
+  rateLimitPerMinute: 120
   jobLockTTLSeconds: 360
   jobDefaultTimeoutSeconds: 300
   jobDefaultMaxRetries: 3
   jobDefaultBackoffSeconds: 30
   workerHeartbeatTTLSeconds: 30
   workerHeartbeatIntervalSeconds: 10
-
-postgres:
-  host: postgres
-  port: 5432
-  user: scheduler
-  password: scheduler
-  database: scheduler_db
-  sslMode: disable
-
-redis:
-  addr: redis:6379
-  password: ""
-  db: 0
-
-kafka:
-  brokers: kafka:9092
-  eventsTopic: scheduler.events
-
-service:
-  type: ClusterIP
-
-ingress:
-  enabled: false
-  className: ""
-  host: scheduler.local
-  annotations: {}
-
+  webhookAllowedHosts: ""
+  webhookAllowPrivate: false
+postgres: {host: postgres, port: 5432, user: scheduler, password: scheduler, database: scheduler_db, sslMode: disable}
+redis: {addr: "redis:6379", password: "", db: 0}
+kafka: {brokers: "kafka:9092", eventsTopic: scheduler.events}
+existingSecret: ""
+service: {type: ClusterIP}
+ingress: {enabled: false, className: "", host: scheduler.local, annotations: {}}
 migrations:
   enabled: false
-  image: migrate/migrate:v4.17.1
-
-serviceAccount:
-  create: true
-  name: ""
+  image: {repository: ghcr.io/bhanu-teja2/distributed-job-scheduler-migrate, tag: latest, pullPolicy: IfNotPresent}
+autoscaling: {enabled: false, minReplicas: 2, maxReplicas: 6, targetCPUUtilizationPercentage: 70}
+pdb: {enabled: true, minAvailable: 1}
+networkPolicy: {enabled: true}
+serviceAccount: {create: true, name: ""}
+podSecurityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+containerSecurityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}

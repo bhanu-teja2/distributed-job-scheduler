@@ -1,0 +1,124 @@
+openapi: 3.1.0
+info:
+  title: Distributed Job Scheduler API
+  version: 1.0.0
+  description: Tenant-scoped API for scheduling and operating durable background jobs.
+servers:
+  - url: http://localhost:8080
+security: [{ApiKey: []}]
+paths:
+  /api/v1/auth/whoami:
+    get:
+      summary: Return the authenticated API client
+      responses: {'200': {$ref: '#/components/responses/Success'}}
+  /api/v1/jobs:
+    get:
+      summary: List tenant jobs
+      parameters:
+        - {in: query, name: status, schema: {type: string}}
+        - {in: query, name: job_type, schema: {type: string, enum: [CALL_WEBHOOK]}}
+        - {in: query, name: page, schema: {type: integer, minimum: 1}}
+        - {in: query, name: page_size, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {in: query, name: sort, schema: {type: string, enum: [created_at, run_at, priority]}}
+        - {in: query, name: order, schema: {type: string, enum: [asc, desc]}}
+        - {in: query, name: created_after, schema: {type: string, format: date-time}}
+        - {in: query, name: created_before, schema: {type: string, format: date-time}}
+      responses: {'200': {$ref: '#/components/responses/Success'}}
+    post:
+      summary: Schedule a webhook job
+      parameters:
+        - {in: header, name: Idempotency-Key, required: false, schema: {type: string, maxLength: 255}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateJob'}
+      responses:
+        '201': {$ref: '#/components/responses/Success'}
+        '200': {description: Existing idempotent request, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /api/v1/jobs/{jobID}:
+    get:
+      summary: Get a job
+      parameters: [{$ref: '#/components/parameters/JobID'}]
+      responses: {'200': {$ref: '#/components/responses/Success'}, '404': {$ref: '#/components/responses/Error'}}
+  /api/v1/jobs/{jobID}/attempts:
+    get:
+      summary: List execution attempts
+      parameters: [{$ref: '#/components/parameters/JobID'}]
+      responses: {'200': {$ref: '#/components/responses/Success'}}
+  /api/v1/jobs/{jobID}/events:
+    get:
+      summary: List durable lifecycle events
+      parameters: [{$ref: '#/components/parameters/JobID'}]
+      responses: {'200': {$ref: '#/components/responses/Success'}}
+  /api/v1/jobs/{jobID}/cancel: {$ref: '#/components/pathItems/JobAction'}
+  /api/v1/jobs/{jobID}/pause: {$ref: '#/components/pathItems/JobAction'}
+  /api/v1/jobs/{jobID}/resume: {$ref: '#/components/pathItems/JobAction'}
+  /api/v1/jobs/{jobID}/retry: {$ref: '#/components/pathItems/JobAction'}
+  /api/v1/workers:
+    get:
+      summary: List active workers
+      responses: {'200': {$ref: '#/components/responses/Success'}}
+  /api/v1/dead-letter-jobs:
+    get:
+      summary: List dead-letter records
+      responses: {'200': {$ref: '#/components/responses/Success'}}
+  /api/v1/dead-letter-jobs/{deadLetterID}/requeue:
+    post:
+      summary: Create a fresh job from a dead-letter record
+      parameters: [{in: path, name: deadLetterID, required: true, schema: {type: string, format: uuid}}]
+      responses: {'201': {$ref: '#/components/responses/Success'}, '404': {$ref: '#/components/responses/Error'}}
+  /api/v1/events/{eventID}/replay:
+    post:
+      summary: Requeue an event for Kafka publication
+      parameters: [{in: path, name: eventID, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {$ref: '#/components/responses/Success'}}
+  /api/v1/dashboard/summary:
+    get:
+      summary: Return tenant operational counts
+      responses: {'200': {$ref: '#/components/responses/Success'}}
+components:
+  securitySchemes:
+    ApiKey: {type: apiKey, in: header, name: X-API-Key}
+  parameters:
+    JobID: {in: path, name: jobID, required: true, schema: {type: string, format: uuid}}
+  pathItems:
+    JobAction:
+      post:
+        parameters: [{$ref: '#/components/parameters/JobID'}]
+        responses: {'200': {$ref: '#/components/responses/Success'}, '409': {$ref: '#/components/responses/Error'}}
+  schemas:
+    CreateJob:
+      type: object
+      required: [name, job_type, payload, run_at]
+      properties:
+        name: {type: string, minLength: 1}
+        job_type: {type: string, enum: [CALL_WEBHOOK]}
+        payload:
+          type: object
+          required: [url]
+          properties:
+            url: {type: string, format: uri}
+            method: {type: string, enum: [GET, POST, PUT, PATCH, DELETE], default: POST}
+            headers: {type: object, additionalProperties: {type: string}}
+            body: {}
+        run_at: {type: string, format: date-time}
+        priority: {type: integer, minimum: 0, maximum: 10, default: 5}
+        max_retries: {type: integer, minimum: 0, default: 3}
+        retry_backoff_seconds: {type: integer, minimum: 0, default: 30}
+        timeout_seconds: {type: integer, minimum: 1, default: 300}
+    Envelope:
+      type: object
+      required: [success, data, request_id]
+      properties:
+        success: {type: boolean}
+        data: {}
+        error: {$ref: '#/components/schemas/APIError'}
+        request_id: {type: string}
+    APIError:
+      type: object
+      properties: {code: {type: string}, message: {type: string}}
+  responses:
+    Success: {description: Successful response, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+    Error: {description: Structured API error, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}

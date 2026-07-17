@@ -1,0 +1,4 @@
+FROM migrate/migrate:v4.17.1
+COPY migrations /migrations
+USER 65532:65532
+ENTRYPOINT ["migrate", "-path=/migrations"]

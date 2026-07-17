@@ -18,14 +18,27 @@ spec:
         app.kubernetes.io/component: worker
     spec:
       serviceAccountName: {{ include "scheduler.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: worker
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
           imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
           envFrom:
             - configMapRef:
                 name: {{ include "scheduler.fullname" . }}-config
             - secretRef:
-                name: {{ include "scheduler.fullname" . }}-secret
+                name: {{ include "scheduler.secretName" . }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.worker.healthPort }}
+          readinessProbe:
+            httpGet: {path: /ready, port: health}
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: health}
+            initialDelaySeconds: 10
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}

@@ -26,3 +26,12 @@ data:
   JOB_DEFAULT_MAX_RETRIES: {{ .Values.env.jobDefaultMaxRetries | quote }}
   JOB_DEFAULT_BACKOFF_SECONDS: {{ .Values.env.jobDefaultBackoffSeconds | quote }}
   LOG_LEVEL: {{ .Values.env.logLevel | quote }}
+  AUTH_ENABLED: {{ .Values.env.authEnabled | quote }}
+  CORS_ALLOWED_ORIGINS: {{ .Values.env.corsAllowedOrigins | quote }}
+  RATE_LIMIT_PER_MINUTE: {{ .Values.env.rateLimitPerMinute | quote }}
+  WORKER_HEALTH_PORT: {{ .Values.worker.healthPort | quote }}
+  EVENT_RELAY_HEALTH_PORT: {{ .Values.relay.healthPort | quote }}
+  EVENT_RELAY_BATCH_SIZE: {{ .Values.relay.batchSize | quote }}
+  EVENT_RELAY_POLL_INTERVAL_SECONDS: {{ .Values.relay.pollIntervalSeconds | quote }}
+  WEBHOOK_ALLOWED_HOSTS: {{ .Values.env.webhookAllowedHosts | quote }}
+  WEBHOOK_ALLOW_PRIVATE: {{ .Values.env.webhookAllowPrivate | quote }}

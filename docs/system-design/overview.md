@@ -1,5 +1,23 @@
 # System Overview
 
+The API authenticates a tenant-scoped API key before any job query. Workers claim from all tenants but retain tenant identity on attempts, dead letters, and lifecycle events. Kafka is downstream of the durable event relay and is never part of the job-state transaction.
+
+```mermaid
+flowchart LR
+    Dashboard["React operations dashboard"] --> Auth["API key auth and RBAC"]
+    Client["Service client"] --> Auth
+    Auth --> API["Scheduler API"]
+    API --> DB[("PostgreSQL jobs, attempts, DLQ, outbox")]
+    WorkerA["Worker replica A"] --> DB
+    WorkerB["Worker replica B"] --> DB
+    WorkerA --> Redis[("Redis locks and heartbeats")]
+    WorkerB --> Redis
+    WorkerA --> Target["Allowlisted webhook target"]
+    WorkerB --> Target
+    Relay["Event relay replicas"] --> DB
+    Relay --> Kafka[("Kafka scheduler.events")]
+```
+
 The Distributed Job Scheduler accepts scheduled work through an API, persists jobs in PostgreSQL, executes due jobs through horizontally scalable workers, coordinates execution with Redis locks, and publishes lifecycle events to Kafka.
 
 ## Goals

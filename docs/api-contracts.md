@@ -1,16 +1,11 @@
 # API Contracts
 
-Base path: `/api/v1`
+The authoritative OpenAPI 3.1 contract is [openapi.yaml](openapi.yaml). All `/api/v1` endpoints require `X-API-Key`; mutation endpoints require operator or admin role. Job creation optionally accepts `Idempotency-Key` and returns the original job for equivalent replays or `409 IDEMPOTENCY_CONFLICT` for a different request.
 
-- `POST /jobs` creates a job.
-- `GET /jobs` lists jobs with `status`, `job_type`, `page`, and `page_size` filters.
-- `GET /jobs/{job_id}` returns one job.
-- `GET /jobs/{job_id}/attempts` returns execution attempts.
-- `GET /dead-letter-jobs` lists dead-letter rows.
-- `POST /dead-letter-jobs/{id}/requeue` creates a fresh job from a dead-letter row.
-
-Responses use:
+Responses retain the envelope:
 
 ```json
 {"success":true,"data":{},"error":null,"request_id":"uuid"}
 ```
+
+Errors use stable codes including `UNAUTHORIZED`, `FORBIDDEN`, `RATE_LIMITED`, `INVALID_INPUT`, `INVALID_TRANSITION`, `IDEMPOTENCY_CONFLICT`, `NOT_FOUND`, and `DEPENDENCY_UNAVAILABLE`.

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
+	"github.com/bhanuteja/distributed-job-scheduler/internal/auth"
 	appErrors "github.com/bhanuteja/distributed-job-scheduler/internal/errors"
 	"github.com/bhanuteja/distributed-job-scheduler/internal/response"
 	"github.com/go-chi/chi/v5"
@@ -23,51 +26,100 @@ func NewHandler(service *Service) *Handler {
 
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
-	r.Post("/", h.create)
+	r.Post("/", auth.Require(auth.RoleOperator, h.create))
 	r.Get("/", h.list)
 	r.Get("/{jobID}", h.get)
 	r.Get("/{jobID}/attempts", h.attempts)
-	r.Post("/{jobID}/cancel", h.cancel)
-	r.Post("/{jobID}/pause", h.pause)
-	r.Post("/{jobID}/resume", h.resume)
-	r.Post("/{jobID}/retry", h.retry)
+	r.Get("/{jobID}/events", h.events)
+	r.Post("/{jobID}/cancel", auth.Require(auth.RoleOperator, h.cancel))
+	r.Post("/{jobID}/pause", auth.Require(auth.RoleOperator, h.pause))
+	r.Post("/{jobID}/resume", auth.Require(auth.RoleOperator, h.resume))
+	r.Post("/{jobID}/retry", auth.Require(auth.RoleOperator, h.retry))
 	return r
 }
 
 func (h *Handler) DeadLetterRoutes() chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", h.deadLetters)
-	r.Post("/{deadLetterID}/requeue", h.requeueDeadLetter)
+	r.Post("/{deadLetterID}/requeue", auth.Require(auth.RoleOperator, h.requeueDeadLetter))
 	return r
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		response.Error(w, r, http.StatusBadRequest, "INVALID_JSON", "request body must be valid JSON")
 		return
 	}
+	req.IdempotencyKey = r.Header.Get("Idempotency-Key")
 	resp, err := h.service.Create(r.Context(), req)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	response.JSON(w, r, http.StatusCreated, resp)
+	status := http.StatusCreated
+	if resp.Replayed {
+		status = http.StatusOK
+	}
+	response.JSON(w, r, status, resp)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	page, err := queryInt(r, "page", 1)
+	if err != nil {
+		response.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
+	pageSize, err := queryInt(r, "page_size", 20)
+	if err != nil {
+		response.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
 	filter := ListFilter{
 		Status:   Status(r.URL.Query().Get("status")),
 		JobType:  r.URL.Query().Get("job_type"),
-		Page:     queryInt(r, "page", 1),
-		PageSize: queryInt(r, "page_size", 20),
+		Page:     page,
+		PageSize: pageSize,
+		Sort:     r.URL.Query().Get("sort"),
+		Order:    r.URL.Query().Get("order"),
 	}
-	page, err := h.service.List(r.Context(), filter)
+	if value := r.URL.Query().Get("created_after"); value != "" {
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "created_after must be RFC3339")
+			return
+		}
+		filter.CreatedAfter = &parsed
+	}
+	if value := r.URL.Query().Get("created_before"); value != "" {
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "created_before must be RFC3339")
+			return
+		}
+		filter.CreatedBefore = &parsed
+	}
+	jobPage, err := h.service.List(r.Context(), filter)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	response.JSON(w, r, http.StatusOK, page)
+	response.JSON(w, r, http.StatusOK, jobPage)
+}
+
+func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseUUID(w, r, "jobID")
+	if !ok {
+		return
+	}
+	items, err := h.service.Events(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	response.JSON(w, r, http.StatusOK, items)
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +177,17 @@ func (h *Handler) transition(w http.ResponseWriter, r *http.Request, fn func(con
 }
 
 func (h *Handler) deadLetters(w http.ResponseWriter, r *http.Request) {
-	items, err := h.service.ListDeadLetters(r.Context(), queryInt(r, "page", 1), queryInt(r, "page_size", 20))
+	page, parseErr := queryInt(r, "page", 1)
+	if parseErr != nil {
+		response.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", parseErr.Error())
+		return
+	}
+	pageSize, parseErr := queryInt(r, "page_size", 20)
+	if parseErr != nil {
+		response.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", parseErr.Error())
+		return
+	}
+	items, err := h.service.ListDeadLetters(r.Context(), page, pageSize)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -146,16 +208,19 @@ func (h *Handler) requeueDeadLetter(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, r, http.StatusCreated, j)
 }
 
-func queryInt(r *http.Request, key string, fallback int) int {
+func queryInt(r *http.Request, key string, fallback int) (int, error) {
 	value := r.URL.Query().Get(key)
 	if value == "" {
-		return fallback
+		return fallback, nil
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("%s must be an integer", key)
 	}
-	return parsed
+	if parsed < 1 {
+		return 0, fmt.Errorf("%s must be at least 1", key)
+	}
+	return parsed, nil
 }
 
 func parseUUID(w http.ResponseWriter, r *http.Request, param string) (uuid.UUID, bool) {
@@ -176,6 +241,8 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		response.Error(w, r, http.StatusConflict, "INVALID_TRANSITION", err.Error())
 	case errors.Is(err, appErrors.ErrConflict):
 		response.Error(w, r, http.StatusConflict, "CONFLICT", err.Error())
+	case errors.Is(err, appErrors.ErrIdempotency):
+		response.Error(w, r, http.StatusConflict, "IDEMPOTENCY_CONFLICT", err.Error())
 	case errors.Is(err, appErrors.ErrNotFound):
 		response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "resource not found")
 	default:

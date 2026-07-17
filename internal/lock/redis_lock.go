@@ -28,3 +28,13 @@ return 0`
 	result, err := l.client.Eval(ctx, script, []string{key}, owner).Int()
 	return result == 1, err
 }
+
+func (l *RedisLock) Extend(ctx context.Context, key, owner string, ttl time.Duration) (bool, error) {
+	const script = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return 0`
+	result, err := l.client.Eval(ctx, script, []string{key}, owner, ttl.Milliseconds()).Int()
+	return result == 1, err
+}

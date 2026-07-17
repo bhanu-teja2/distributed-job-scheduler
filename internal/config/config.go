@@ -27,6 +27,15 @@ type Config struct {
 	JobDefaultMaxRetries     int
 	JobDefaultBackoffSeconds int
 	LogLevel                 string
+	AuthEnabled              bool
+	CORSAllowedOrigins       []string
+	RateLimitPerMinute       int
+	EventRelayBatchSize      int
+	EventRelayPollInterval   time.Duration
+	EventRelayHealthPort     string
+	WebhookAllowedHosts      []string
+	WebhookAllowPrivate      bool
+	WorkerHealthPort         string
 }
 
 func Load() Config {
@@ -57,7 +66,28 @@ func Load() Config {
 		JobDefaultMaxRetries:     envInt("JOB_DEFAULT_MAX_RETRIES", 3),
 		JobDefaultBackoffSeconds: envInt("JOB_DEFAULT_BACKOFF_SECONDS", 30),
 		LogLevel:                 env("LOG_LEVEL", "debug"),
+		AuthEnabled:              envBool("AUTH_ENABLED", true),
+		CORSAllowedOrigins:       split(env("CORS_ALLOWED_ORIGINS", "http://localhost:3000")),
+		RateLimitPerMinute:       envInt("RATE_LIMIT_PER_MINUTE", 120),
+		EventRelayBatchSize:      envInt("EVENT_RELAY_BATCH_SIZE", 100),
+		EventRelayPollInterval:   time.Duration(envInt("EVENT_RELAY_POLL_INTERVAL_SECONDS", 1)) * time.Second,
+		EventRelayHealthPort:     env("EVENT_RELAY_HEALTH_PORT", "8091"),
+		WebhookAllowedHosts:      split(env("WEBHOOK_ALLOWED_HOSTS", "")),
+		WebhookAllowPrivate:      envBool("WEBHOOK_ALLOW_PRIVATE", false),
+		WorkerHealthPort:         env("WORKER_HEALTH_PORT", "8090"),
 	}
+}
+
+func envBool(key string, fallback bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func env(key, fallback string) string {
