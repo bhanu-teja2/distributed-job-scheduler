@@ -16,27 +16,38 @@ import (
 	"github.com/bhanuteja/distributed-job-scheduler/internal/job"
 )
 
+// Handler executes one supported job type and returns sanitized result metadata.
 type Handler interface {
 	Execute(context.Context, job.Job) (json.RawMessage, error)
 }
+
+// HandlerFunc adapts a function to Handler.
 type HandlerFunc func(context.Context, job.Job) (json.RawMessage, error)
 
+// Execute invokes the adapted function.
 func (f HandlerFunc) Execute(ctx context.Context, j job.Job) (json.RawMessage, error) {
 	return f(ctx, j)
 }
 
+// ExecutorOptions controls webhook network boundaries.
 type ExecutorOptions struct {
 	AllowedHosts         []string
 	AllowPrivateNetworks bool
 }
 
+// Executor dispatches a job to the handler registered for its type.
 type Executor struct{ handlers map[string]Handler }
 
+// NewExecutor creates an executor that rejects private webhook destinations.
 func NewExecutor() *Executor { return NewExecutorWithOptions(ExecutorOptions{}) }
+
+// NewExecutorWithOptions creates an executor with explicit network policy.
 func NewExecutorWithOptions(options ExecutorOptions) *Executor {
 	webhook := NewWebhookHandler(options)
 	return &Executor{handlers: map[string]Handler{"CALL_WEBHOOK": webhook}}
 }
+
+// Execute dispatches a job or returns a permanent unsupported-type error.
 func (e *Executor) Execute(ctx context.Context, j job.Job) (json.RawMessage, error) {
 	handler, ok := e.handlers[j.JobType]
 	if !ok {
@@ -45,6 +56,7 @@ func (e *Executor) Execute(ctx context.Context, j job.Job) (json.RawMessage, err
 	return handler.Execute(ctx, j)
 }
 
+// ExecutionError carries stable classification, retry guidance, and safe metadata.
 type ExecutionError struct {
 	Code       string
 	Message    string
@@ -53,8 +65,10 @@ type ExecutionError struct {
 	Metadata   json.RawMessage
 }
 
+// Error returns the operator-safe execution message.
 func (e *ExecutionError) Error() string { return e.Message }
 
+// ClassifyError converts executor and context errors into persistence metadata.
 func ClassifyError(err error) job.ExecutionResult {
 	var executionErr *ExecutionError
 	if errors.As(err, &executionErr) {
@@ -83,11 +97,14 @@ type webhookPayload struct {
 	Body    json.RawMessage   `json:"body"`
 }
 
+// WebhookHandler performs bounded HTTP calls with redirect and SSRF protection.
 type WebhookHandler struct {
 	client  *http.Client
 	options ExecutorOptions
 }
 
+// NewWebhookHandler creates a webhook client with connection, TLS, header, and
+// overall timeouts. Host validation runs again at dial time to limit DNS rebinding.
 func NewWebhookHandler(options ExecutorOptions) *WebhookHandler {
 	h := &WebhookHandler{options: options}
 	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
@@ -110,6 +127,7 @@ func NewWebhookHandler(options ExecutorOptions) *WebhookHandler {
 	return h
 }
 
+// Execute validates and invokes a webhook, returning bounded response metadata.
 func (h *WebhookHandler) Execute(ctx context.Context, j job.Job) (json.RawMessage, error) {
 	var payload webhookPayload
 	if err := json.Unmarshal(j.Payload, &payload); err != nil {
@@ -140,6 +158,8 @@ func (h *WebhookHandler) Execute(ctx context.Context, j job.Job) (json.RawMessag
 		return nil, &ExecutionError{Code: "REQUEST_BUILD_FAILED", Message: err.Error(), Retryable: false}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Scheduler-owned identifiers make receiver-side deduplication possible and
+	// cannot be overridden by payload-provided headers.
 	req.Header.Set("X-Scheduler-Job-ID", j.ID.String())
 	req.Header.Set("X-Scheduler-Attempt", strconv.Itoa(j.AttemptNumber))
 	req.Header.Set("Idempotency-Key", j.ID.String())
@@ -156,6 +176,8 @@ func (h *WebhookHandler) Execute(ctx context.Context, j job.Job) (json.RawMessag
 		return nil, &ExecutionError{Code: "WEBHOOK_NETWORK_ERROR", Message: err.Error(), Retryable: true}
 	}
 	defer resp.Body.Close()
+	// Store enough response context for diagnosis without allowing unbounded
+	// target responses to consume worker memory or database space.
 	excerpt, readErr := io.ReadAll(io.LimitReader(resp.Body, 4097))
 	if readErr != nil {
 		return nil, &ExecutionError{Code: "WEBHOOK_READ_ERROR", Message: readErr.Error(), Retryable: true}
@@ -191,6 +213,8 @@ func (h *WebhookHandler) validateHost(ctx context.Context, host string) error {
 			return nil
 		}
 	}
+	// Validate every resolved address; accepting one public address is unsafe if
+	// another result can route the request into a private network.
 	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return fmt.Errorf("resolve webhook host: %w", err)

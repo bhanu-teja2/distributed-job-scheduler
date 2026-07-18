@@ -7,9 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// Status is a persisted state in the scheduler lifecycle state machine.
 type Status string
 
 const (
+	// StatusPending through StatusPaused are the supported persisted job states.
 	StatusPending        Status = "PENDING"
 	StatusScheduled      Status = "SCHEDULED"
 	StatusRunning        Status = "RUNNING"
@@ -21,6 +23,8 @@ const (
 	StatusPaused         Status = "PAUSED"
 )
 
+// Job is the authoritative scheduled-work record stored in PostgreSQL.
+// ActiveAttemptID and AttemptNumber are worker-only claim metadata.
 type Job struct {
 	ID                  uuid.UUID       `json:"id"`
 	TenantID            uuid.UUID       `json:"tenant_id"`
@@ -49,6 +53,7 @@ type Job struct {
 	AttemptNumber       int             `json:"-"`
 }
 
+// Attempt records one claimed execution, including sanitized result metadata.
 type Attempt struct {
 	ID                  uuid.UUID       `json:"id"`
 	JobID               uuid.UUID       `json:"job_id"`
@@ -66,6 +71,7 @@ type Attempt struct {
 	Retryable           *bool           `json:"retryable,omitempty"`
 }
 
+// DeadLetterJob preserves terminal failure context for diagnosis and requeue.
 type DeadLetterJob struct {
 	ID            uuid.UUID       `json:"id"`
 	OriginalJobID uuid.UUID       `json:"original_job_id"`
@@ -81,6 +87,7 @@ type DeadLetterJob struct {
 	RequeuedJobID *uuid.UUID      `json:"requeued_job_id,omitempty"`
 }
 
+// Event is the API representation of a job's durable lifecycle timeline.
 type Event struct {
 	ID               uuid.UUID       `json:"event_id"`
 	JobID            uuid.UUID       `json:"job_id"`
@@ -97,6 +104,7 @@ type Event struct {
 	LastPublishError *string         `json:"last_publish_error,omitempty"`
 }
 
+// DashboardSummary aggregates tenant-scoped operational counts.
 type DashboardSummary struct {
 	StatusCounts       map[Status]int64 `json:"status_counts"`
 	ActiveWorkers      int              `json:"active_workers"`
@@ -104,6 +112,7 @@ type DashboardSummary struct {
 	FailuresLast24Hour int64            `json:"failures_last_24_hours"`
 }
 
+// ExecutionResult is the normalized outcome persisted for a failed attempt.
 type ExecutionResult struct {
 	Metadata  json.RawMessage
 	ErrorCode string

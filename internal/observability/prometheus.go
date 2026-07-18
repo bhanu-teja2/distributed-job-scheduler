@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// PrometheusRecorder implements Recorder using process-global collectors.
 type PrometheusRecorder struct {
 	jobsCreated       *prometheus.CounterVec
 	jobsCompleted     *prometheus.CounterVec
@@ -19,6 +20,7 @@ type PrometheusRecorder struct {
 	activeWorkers     prometheus.Gauge
 }
 
+// NewPrometheusRecorder returns a recorder backed by registered collectors.
 func NewPrometheusRecorder() *PrometheusRecorder {
 	return &PrometheusRecorder{
 		jobsCreated: promauto.NewCounterVec(prometheus.CounterOpts{
@@ -53,31 +55,38 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	}
 }
 
+// JobCreated increments created jobs by type.
 func (r *PrometheusRecorder) JobCreated(jobType string) {
 	r.jobsCreated.WithLabelValues(jobType).Inc()
 }
 
+// JobCompleted records success count and execution duration.
 func (r *PrometheusRecorder) JobCompleted(jobType string, duration time.Duration) {
 	r.jobsCompleted.WithLabelValues(jobType).Inc()
 	r.executionDuration.WithLabelValues(jobType).Observe(duration.Seconds())
 }
 
+// JobFailed increments failed attempts by type.
 func (r *PrometheusRecorder) JobFailed(jobType string) {
 	r.jobsFailed.WithLabelValues(jobType).Inc()
 }
 
+// JobDeadLettered increments terminal failures by type.
 func (r *PrometheusRecorder) JobDeadLettered(jobType string) {
 	r.jobsDeadLettered.WithLabelValues(jobType).Inc()
 }
 
+// WorkerClaimed adds the number of jobs claimed in a poll.
 func (r *PrometheusRecorder) WorkerClaimed(count int) {
 	r.workerClaimed.Add(float64(count))
 }
 
+// SetActiveWorkers updates the live-worker gauge.
 func (r *PrometheusRecorder) SetActiveWorkers(count int) {
 	r.activeWorkers.Set(float64(count))
 }
 
+// Handler exposes Prometheus metrics using the standard text protocol.
 func Handler() http.Handler {
 	return promhttp.Handler()
 }

@@ -31,6 +31,8 @@ func main() {
 		log.Fatal("failed to connect postgres", zap.Error(err))
 	}
 	defer db.Close()
+	// Relay publication is isolated from API and worker transactions; durable
+	// rows remain available for retry whenever Kafka is unavailable.
 	publisher := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaEventsTopic)
 	defer func() { _ = publisher.Close() }()
 	relay := outbox.NewRelay(outbox.NewStore(db), publisher, log, cfg.EventRelayBatchSize, cfg.EventRelayPollInterval)

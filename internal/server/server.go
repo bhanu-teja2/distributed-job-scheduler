@@ -20,6 +20,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// Options supplies optional security, dependency, and operational integrations.
 type Options struct {
 	Authenticator  auth.Authenticator
 	AuthEnabled    bool
@@ -29,6 +30,8 @@ type Options struct {
 	ReadyChecks    []func(context.Context) error
 }
 
+// New assembles the API router. Health and readiness remain public; all
+// /api/v1 routes pass through authentication and optional rate limiting.
 func New(log *zap.Logger, db *pgxpool.Pool, jobs *job.Handler, registry worker.Registry, metrics observability.Recorder, options ...Options) http.Handler {
 	var opts Options
 	if len(options) > 0 {
@@ -45,6 +48,8 @@ func New(log *zap.Logger, db *pgxpool.Pool, jobs *job.Handler, registry worker.R
 		response.JSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		// Readiness is stricter than liveness: traffic is accepted only while the
+		// authoritative database and configured runtime dependencies respond.
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		if err := db.Ping(ctx); err != nil {

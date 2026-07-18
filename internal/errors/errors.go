@@ -3,6 +3,7 @@ package errors
 import "errors"
 
 var (
+	// Domain sentinel errors are wrapped with context and translated by the HTTP layer.
 	ErrNotFound          = errors.New("not found")
 	ErrInvalidInput      = errors.New("invalid input")
 	ErrInvalidTransition = errors.New("invalid status transition")

@@ -16,10 +16,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// ExecutorInterface is the execution boundary used by the worker service.
 type ExecutorInterface interface {
 	Execute(ctx context.Context, j job.Job) (json.RawMessage, error)
 }
 
+// LockManager is the secondary distributed lease contract.
 type LockManager interface {
 	Acquire(ctx context.Context, key, owner string, ttl time.Duration) (bool, error)
 	Release(ctx context.Context, key, owner string) (bool, error)
@@ -29,6 +31,7 @@ type renewableLockManager interface {
 	Extend(context.Context, string, string, time.Duration) (bool, error)
 }
 
+// Service polls, claims, and executes jobs with bounded local concurrency.
 type Service struct {
 	repo              job.Repository
 	executor          ExecutorInterface
@@ -45,6 +48,7 @@ type Service struct {
 	heartbeatInterval time.Duration
 }
 
+// NewService creates a worker and normalizes unsafe concurrency and batch values.
 func NewService(repo job.Repository, executor ExecutorInterface, log *zap.Logger, workerID string, concurrency, batchSize int, pollInterval, lockTTL time.Duration) *Service {
 	if workerID == "" {
 		workerID = "worker-" + uuid.NewString()
@@ -58,6 +62,7 @@ func NewService(repo job.Repository, executor ExecutorInterface, log *zap.Logger
 	return &Service{repo: repo, executor: executor, log: log, workerID: workerID, concurrency: concurrency, batchSize: batchSize, pollInterval: pollInterval, lockTTL: lockTTL, lockManager: noopLockManager{}, metrics: observability.NoopRecorder{}, registry: NoopRegistry{}, heartbeatTTL: 30 * time.Second, heartbeatInterval: 10 * time.Second}
 }
 
+// WithLockManager configures the secondary distributed lease implementation.
 func (s *Service) WithLockManager(lockManager LockManager) *Service {
 	if lockManager != nil {
 		s.lockManager = lockManager
@@ -65,6 +70,7 @@ func (s *Service) WithLockManager(lockManager LockManager) *Service {
 	return s
 }
 
+// WithMetrics configures lifecycle and worker metrics.
 func (s *Service) WithMetrics(metrics observability.Recorder) *Service {
 	if metrics != nil {
 		s.metrics = metrics
@@ -72,6 +78,7 @@ func (s *Service) WithMetrics(metrics observability.Recorder) *Service {
 	return s
 }
 
+// WithRegistry configures worker heartbeats and their expiry timings.
 func (s *Service) WithRegistry(registry Registry, ttl, interval time.Duration) *Service {
 	if registry != nil {
 		s.registry = registry
@@ -85,6 +92,8 @@ func (s *Service) WithRegistry(registry Registry, ttl, interval time.Duration) *
 	return s
 }
 
+// Run starts worker slots, recovery, heartbeats, and the claim loop. It returns
+// after cancellation and waits for all in-process job slots to stop.
 func (s *Service) Run(ctx context.Context) error {
 	s.log.Info("worker started", zap.String("worker_id", s.workerID), zap.Int("concurrency", s.concurrency))
 	jobs := make(chan job.Job)
@@ -111,6 +120,8 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			// Recovery precedes new claims so expired RUNNING attempts consume their
+			// retry budget before another worker executes the job again.
 			if recovered, err := s.repo.RecoverExpiredRunningJobs(ctx, "worker lease expired before completion"); err != nil {
 				s.log.Error("failed to recover expired jobs", zap.Error(err))
 			} else if recovered > 0 {
@@ -164,12 +175,16 @@ func (s *Service) consume(ctx context.Context, jobs <-chan job.Job, slot int) {
 	}
 }
 
+// ProcessJob obtains the secondary lease, executes one attempt, and atomically
+// finalizes success, retry, or dead-letter state.
 func (s *Service) ProcessJob(ctx context.Context, j job.Job) error {
 	lockKey := "lock:job:" + j.ID.String()
 	leaseTTL := s.lockTTL
 	if leaseTTL <= 0 {
 		leaseTTL = time.Duration(j.TimeoutSeconds+60) * time.Second
 	}
+	// PostgreSQL has already claimed the job. Redis is defense in depth for
+	// external side effects and is released only by the owner value.
 	acquired, err := s.lockManager.Acquire(ctx, lockKey, s.workerID, leaseTTL)
 	if err != nil {
 		return fmt.Errorf("acquire redis lock: %w", err)
@@ -230,6 +245,8 @@ func (s *Service) ProcessJob(ctx context.Context, j job.Job) error {
 		nextStatus = job.StatusDeadLettered
 	}
 	if failErr := s.repo.FailExecution(ctx, j, s.workerID, duration, outcome, nextStatus, decision.NextRetryCount, decision.NextRunAt); failErr != nil {
+		// An operator cancellation can win the ownership-checked finalization race;
+		// that conflict is expected once the handler context has been cancelled.
 		if errors.Is(err, context.Canceled) && errors.Is(failErr, appErrors.ErrConflict) {
 			return nil
 		}
@@ -257,6 +274,8 @@ func (s *Service) renewLease(ctx context.Context, cancel context.CancelFunc, don
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Losing either authoritative DB ownership or the secondary Redis lease
+			// cancels execution before this worker can commit an outcome.
 			ok, err := s.repo.ExtendLease(ctx, jobID, s.workerID, ttl)
 			if err != nil || !ok {
 				cancel()

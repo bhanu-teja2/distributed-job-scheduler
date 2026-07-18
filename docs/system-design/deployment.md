@@ -26,10 +26,13 @@ The project supports Docker Compose for local development and Helm for Kubernete
 flowchart TB
     API["api container"] --> PG["postgres:16"]
     API --> Redis["redis:7"]
-    API --> Kafka["cp-kafka"]
     Worker["worker container"] --> PG
     Worker --> Redis
-    Worker --> Kafka
+    Worker --> Webhook["webhook test target"]
+    Relay["event-relay container"] --> PG
+    Relay --> Kafka["cp-kafka"]
+    Dashboard["dashboard container"] --> API
+    Migration["migration container"] --> PG
     KafkaUI["kafka-ui"] --> Kafka
     Kafka --> ZK["zookeeper"]
 ```
@@ -44,12 +47,15 @@ flowchart TB
     ApiPods --> PG
     ApiPods --> Redis[("Redis external")]
     WorkerPods --> Redis
-    ApiPods --> Kafka[("Kafka external")]
-    WorkerPods --> Kafka
+    RelayPods["Event Relay Deployment"] --> PG
+    RelayPods --> Kafka[("Kafka external")]
+    DashboardPods["Dashboard Deployment optional"] --> Svc
     Config["ConfigMap"] --> ApiPods
     Config --> WorkerPods
+    Config --> RelayPods
     Secret["Secret"] --> ApiPods
     Secret --> WorkerPods
+    Secret --> RelayPods
 ```
 
 The Helm chart keeps migrations disabled by default. Operators can enable the migration Job explicitly during controlled rollout.

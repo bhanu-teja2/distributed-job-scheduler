@@ -7,6 +7,8 @@ import (
 	"go.uber.org/zap"
 )
 
+// Recovery converts panics into a logged HTTP 500 response without terminating
+// the API process.
 func Recovery(log *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

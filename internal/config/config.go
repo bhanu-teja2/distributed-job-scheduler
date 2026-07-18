@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// Config contains the environment-derived settings shared by all processes.
 type Config struct {
 	AppEnv                   string
 	APIPort                  string
@@ -38,6 +39,7 @@ type Config struct {
 	WorkerHealthPort         string
 }
 
+// Load reads environment variables and applies local-development defaults.
 func Load() Config {
 	postgresHost := env("POSTGRES_HOST", "localhost")
 	postgresPort := env("POSTGRES_PORT", "5432")

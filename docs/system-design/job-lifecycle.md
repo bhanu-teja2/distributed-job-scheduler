@@ -31,11 +31,9 @@ sequenceDiagram
     participant C as Client
     participant API as Scheduler API
     participant DB as PostgreSQL
-    participant K as Kafka
     C->>API: POST /api/v1/jobs
     API->>API: Validate request and defaults
-    API->>DB: Insert job
-    API-->>K: job.created
+    API->>DB: Transactionally insert job and job.created outbox row
     API-->>C: job_id and status
 ```
 
@@ -45,14 +43,10 @@ sequenceDiagram
 sequenceDiagram
     participant W as Worker
     participant DB as PostgreSQL
-    participant K as Kafka
-    W->>DB: Mark attempt failed
     W->>W: Decide retry or dead-letter
     alt retries remain
-        W->>DB: Set RETRY_SCHEDULED and next run_at
-        W-->>K: job.retry_scheduled
+        W->>DB: Atomically fail attempt, schedule retry, and append events
     else max retries exhausted
-        W->>DB: Set DEAD_LETTERED and insert dead_letter_jobs
-        W-->>K: job.dead_lettered
+        W->>DB: Atomically fail attempt, dead-letter job, and append events
     end
 ```

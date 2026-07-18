@@ -10,18 +10,25 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// RateLimiter is a Redis-backed token bucket scoped to an API client.
 type RateLimiter struct {
 	client   *redis.Client
 	capacity int
 }
 
+// NewRateLimiter creates a limiter with the requested per-minute capacity.
+// Non-positive capacities use the conservative default of 120 requests/minute.
 func NewRateLimiter(client *redis.Client, perMinute int) *RateLimiter {
 	if perMinute < 1 {
 		perMinute = 120
 	}
 	return &RateLimiter{client: client, capacity: perMinute}
 }
+
+// Allow atomically refills and consumes one token using a Redis Lua script.
 func (l *RateLimiter) Allow(ctx context.Context, clientID string) (bool, time.Duration, error) {
+	// Server-side execution prevents concurrent API replicas from over-consuming
+	// a bucket between separate read and write operations.
 	const script = `
 local capacity=tonumber(ARGV[1]); local rate=capacity/60; local now=tonumber(ARGV[2]);
 local values=redis.call('HMGET',KEYS[1],'tokens','updated'); local tokens=tonumber(values[1]) or capacity; local updated=tonumber(values[2]) or now;
@@ -37,6 +44,9 @@ redis.call('HMSET',KEYS[1],'tokens',tokens,'updated',now); redis.call('EXPIRE',K
 	}
 	return false, time.Second, error(nil)
 }
+
+// Middleware rejects exhausted clients with HTTP 429 and fails closed if Redis
+// is unavailable.
 func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := FromContext(r.Context())

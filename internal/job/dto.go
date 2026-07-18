@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// CreateRequest is the validated input for a scheduled webhook job.
 type CreateRequest struct {
 	Name                string          `json:"name"`
 	JobType             string          `json:"job_type"`
@@ -17,12 +18,14 @@ type CreateRequest struct {
 	IdempotencyKey      string          `json:"-"`
 }
 
+// CreateResponse identifies a newly created or idempotently replayed job.
 type CreateResponse struct {
 	JobID    string `json:"job_id"`
 	Status   Status `json:"status"`
 	Replayed bool   `json:"-"`
 }
 
+// ListFilter contains validated tenant-scoped list and ordering criteria.
 type ListFilter struct {
 	Status        Status
 	JobType       string
@@ -34,6 +37,7 @@ type ListFilter struct {
 	CreatedBefore *time.Time
 }
 
+// Page is a bounded page of jobs and its total matching count.
 type Page struct {
 	Items    []Job `json:"items"`
 	Page     int   `json:"page"`

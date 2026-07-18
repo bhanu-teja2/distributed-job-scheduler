@@ -30,9 +30,9 @@ The Distributed Job Scheduler accepts scheduled work through an API, persists jo
 
 ## Non-Goals
 
-- Real email, payment, report, or webhook integrations.
-- A frontend dashboard.
+- Real email, payment, or report integrations beyond the implemented webhook executor.
 - Exactly-once execution guarantees across all external side effects.
+- Workflow DAGs, cron recurrence, billing, and multi-region consensus.
 
 ## Container Diagram
 
@@ -40,11 +40,12 @@ The Distributed Job Scheduler accepts scheduled work through an API, persists jo
 flowchart LR
     Client["API client"] --> API["Scheduler API"]
     API --> PG[("PostgreSQL")]
-    API --> Redis[("Redis")]
-    API --> Kafka[("Kafka")]
+    API --> Redis[("Redis rate limits")]
     Worker["Worker service"] --> PG
     Worker --> Redis
-    Worker --> Kafka
-    Worker --> Handlers["Simulated job handlers"]
+    Worker --> Handlers["HTTP webhook targets"]
+    Relay["Event relay"] --> PG
+    Relay --> Kafka[("Kafka lifecycle events")]
+    Dashboard["React dashboard"] --> API
     Ops["Prometheus / Operators"] --> API
 ```

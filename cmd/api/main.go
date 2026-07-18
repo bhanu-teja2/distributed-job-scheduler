@@ -44,12 +44,16 @@ func main() {
 	}
 	defer func() { _ = redisClient.Close() }()
 
+	// The API writes only to PostgreSQL. Kafka publication is intentionally
+	// delegated to the event-relay process through the durable outbox.
 	repo := job.NewPostgresRepository(db)
 	metrics := observability.NewPrometheusRecorder()
 	service := job.NewService(repo, cfg.JobDefaultMaxRetries, cfg.JobDefaultBackoffSeconds, int(cfg.JobDefaultTimeout.Seconds())).WithMetrics(metrics)
 	handler := job.NewHandler(service)
 	registry := worker.NewRedisRegistry(redisClient)
 
+	// Readiness includes Redis because authentication rate limits and worker
+	// discovery depend on it even though PostgreSQL remains authoritative.
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.APIPort,
 		Handler:           server.New(log, db, handler, registry, metrics, server.Options{Authenticator: auth.NewStore(db), AuthEnabled: cfg.AuthEnabled, RateLimiter: auth.NewRateLimiter(redisClient, cfg.RateLimitPerMinute), AllowedOrigins: cfg.CORSAllowedOrigins, Outbox: outbox.NewStore(db), ReadyChecks: []func(context.Context) error{func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }}}),

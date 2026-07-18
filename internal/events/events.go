@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	// Job lifecycle event names form the stable Kafka contract.
 	JobCreated        = "job.created"
 	JobClaimed        = "job.claimed"
 	JobStarted        = "job.started"
@@ -20,10 +21,12 @@ const (
 	WorkerHeartbeat   = "worker.heartbeat"
 )
 
+// Publisher sends a durable event to an external event transport.
 type Publisher interface {
 	Publish(ctx context.Context, event Event) error
 }
 
+// Event is the versioned lifecycle envelope published by the outbox relay.
 type Event struct {
 	EventID         uuid.UUID       `json:"event_id"`
 	SchemaVersion   int             `json:"schema_version"`
@@ -39,12 +42,15 @@ type Event struct {
 	PublishAttempts int             `json:"-"`
 }
 
+// NoopPublisher accepts events without external delivery, primarily for tests.
 type NoopPublisher struct{}
 
+// Publish satisfies Publisher without performing I/O.
 func (NoopPublisher) Publish(ctx context.Context, event Event) error {
 	return nil
 }
 
+// New creates a version-one event envelope with a generated event ID.
 func New(eventType, source, entityType, entityID string, payload any) Event {
 	body, _ := json.Marshal(payload)
 	return Event{

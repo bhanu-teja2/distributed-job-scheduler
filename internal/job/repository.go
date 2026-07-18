@@ -16,6 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Repository defines persistence operations required by API and worker services.
+// Implementations must enforce tenant and worker ownership where parameters are
+// present, and transactional methods must commit state and lifecycle events together.
 type Repository interface {
 	Create(ctx context.Context, job Job) (Job, error)
 	List(ctx context.Context, tenantID uuid.UUID, filter ListFilter) (Page, error)
@@ -42,14 +45,17 @@ type Repository interface {
 	ExtendLease(ctx context.Context, jobID uuid.UUID, workerID string, ttl time.Duration) (bool, error)
 }
 
+// PostgresRepository stores authoritative scheduler state in PostgreSQL.
 type PostgresRepository struct {
 	pool *pgxpool.Pool
 }
 
+// NewPostgresRepository creates a repository backed by the supplied pool.
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
 }
 
+// Create inserts a tenant-owned job and its job.created outbox event atomically.
 func (r *PostgresRepository) Create(ctx context.Context, j Job) (Job, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -66,6 +72,8 @@ RETURNING id, name, job_type, payload, status, priority, run_at, locked_until, l
     created_at, updated_at, completed_at, failed_at, cancelled_at, tenant_id, idempotency_key, request_hash`
 	inserted, err := scanJob(tx.QueryRow(ctx, query, j.ID, j.Name, j.JobType, j.Payload, j.Status, j.Priority, j.RunAt, j.RetryCount, j.MaxRetries, j.RetryBackoffSeconds, j.TimeoutSeconds, j.CreatedBy, j.TenantID, j.IdempotencyKey, j.RequestHash))
 	if err != nil {
+		// The unique tenant/key index arbitrates concurrent idempotent requests.
+		// Matching hashes replay the original result; different hashes conflict.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && j.IdempotencyKey != nil {
 			_ = tx.Rollback(ctx)
@@ -86,6 +94,7 @@ RETURNING id, name, job_type, payload, status, priority, run_at, locked_until, l
 	return inserted, tx.Commit(ctx)
 }
 
+// List returns a bounded, deterministically ordered page for one tenant.
 func (r *PostgresRepository) List(ctx context.Context, tenantID uuid.UUID, filter ListFilter) (Page, error) {
 	page := normalizePage(filter.Page)
 	pageSize := normalizePageSize(filter.PageSize)
@@ -115,6 +124,7 @@ FROM jobs ` + where + ` ORDER BY ` + filter.Sort + ` ` + filter.Order + `, id ` 
 	return Page{Items: items, Page: page, PageSize: pageSize, Total: total}, nil
 }
 
+// GetByID returns a job only when it belongs to tenantID.
 func (r *PostgresRepository) GetByID(ctx context.Context, tenantID, id uuid.UUID) (Job, error) {
 	const query = `SELECT id, name, job_type, payload, status, priority, run_at, locked_until, locked_by,
     retry_count, max_retries, retry_backoff_seconds, timeout_seconds, last_error, created_by,
@@ -126,6 +136,7 @@ func (r *PostgresRepository) GetByID(ctx context.Context, tenantID, id uuid.UUID
 	return j, err
 }
 
+// ListAttempts returns execution attempts in attempt-number order.
 func (r *PostgresRepository) ListAttempts(ctx context.Context, tenantID, jobID uuid.UUID) ([]Attempt, error) {
 	const query = `SELECT id, job_id, worker_id, attempt_number, status, started_at, completed_at,
     failed_at, error_message, execution_duration_ms, created_at, result, error_code, retryable FROM job_attempts WHERE tenant_id=$1 AND job_id=$2 ORDER BY attempt_number ASC`
@@ -146,6 +157,7 @@ func (r *PostgresRepository) ListAttempts(ctx context.Context, tenantID, jobID u
 	return attempts, rows.Err()
 }
 
+// ListEvents returns the durable lifecycle timeline for a tenant-owned job.
 func (r *PostgresRepository) ListEvents(ctx context.Context, tenantID, jobID uuid.UUID) ([]Event, error) {
 	rows, err := r.pool.Query(ctx, `SELECT id, job_id, tenant_id, event_type, source, schema_version, correlation_id, causation_id, payload, created_at, published_at, publish_attempts, last_publish_error FROM job_events WHERE tenant_id=$1 AND job_id=$2 ORDER BY created_at ASC, id ASC`, tenantID, jobID)
 	if err != nil {
@@ -163,12 +175,15 @@ func (r *PostgresRepository) ListEvents(ctx context.Context, tenantID, jobID uui
 	return items, rows.Err()
 }
 
+// ClaimDueJobs atomically leases due jobs and creates their running attempts.
 func (r *PostgresRepository) ClaimDueJobs(ctx context.Context, workerID string, batchSize int, lockTTL time.Duration) ([]Job, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// SKIP LOCKED lets worker replicas claim disjoint rows without serializing
+	// behind work already selected by another transaction.
 	const query = `SELECT id, name, job_type, payload, status, priority, run_at, locked_until, locked_by,
     retry_count, max_retries, retry_backoff_seconds, timeout_seconds, last_error, created_by,
     created_at, updated_at, completed_at, failed_at, cancelled_at, tenant_id, idempotency_key, request_hash
@@ -189,6 +204,8 @@ func (r *PostgresRepository) ClaimDueJobs(ctx context.Context, workerID string, 
 	}
 	for i := range items {
 		j := &items[i]
+		// Claim state, attempt creation, and job.started share this transaction;
+		// observers can never see a RUNNING job without its active attempt/event.
 		_, err = tx.Exec(ctx, `UPDATE jobs SET status='RUNNING',locked_by=$2,locked_until=now()+$3*interval '1 second',updated_at=now() WHERE id=$1`, j.ID, workerID, int(lockTTL.Seconds()))
 		if err != nil {
 			return nil, err
@@ -210,12 +227,15 @@ func (r *PostgresRepository) ClaimDueJobs(ctx context.Context, workerID string, 
 	return items, tx.Commit(ctx)
 }
 
+// CompleteExecution atomically finalizes an owned attempt and job as successful.
 func (r *PostgresRepository) CompleteExecution(ctx context.Context, j Job, workerID string, duration time.Duration, result json.RawMessage) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The ownership predicate prevents a stale worker from finalizing work after
+	// lease recovery transferred the job to another worker.
 	tag, err := tx.Exec(ctx, `UPDATE jobs SET status='SUCCEEDED',completed_at=now(),locked_by=NULL,locked_until=NULL,updated_at=now() WHERE id=$1 AND tenant_id=$2 AND locked_by=$3 AND status='RUNNING'`, j.ID, j.TenantID, workerID)
 	if err != nil {
 		return err
@@ -236,6 +256,7 @@ func (r *PostgresRepository) CompleteExecution(ctx context.Context, j Job, worke
 	return tx.Commit(ctx)
 }
 
+// FailExecution atomically records failure and schedules retry or dead-lettering.
 func (r *PostgresRepository) FailExecution(ctx context.Context, j Job, workerID string, duration time.Duration, outcome ExecutionResult, nextStatus Status, nextRetryCount int, nextRunAt time.Time) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -252,6 +273,8 @@ func (r *PostgresRepository) FailExecution(ctx context.Context, j Job, workerID 
 	if err := insertJobEvent(ctx, tx, j, "job.failed", "worker", map[string]any{"worker_id": workerID, "attempt_number": j.AttemptNumber, "error": outcome.Message, "error_code": outcome.ErrorCode, "retryable": outcome.Retryable}); err != nil {
 		return err
 	}
+	// Both branches finalize the attempt, change job state, and append all
+	// lifecycle events atomically. The DLQ branch also creates its audit record.
 	if nextStatus == StatusDeadLettered {
 		tag, err = tx.Exec(ctx, `UPDATE jobs SET status='DEAD_LETTERED',retry_count=$2,last_error=$3,failed_at=now(),locked_by=NULL,locked_until=NULL,updated_at=now() WHERE id=$1 AND locked_by=$4 AND status='RUNNING'`, j.ID, nextRetryCount, outcome.Message, workerID)
 		if err != nil {
@@ -282,11 +305,13 @@ func (r *PostgresRepository) FailExecution(ctx context.Context, j Job, workerID 
 	return tx.Commit(ctx)
 }
 
+// ExtendLease renews a RUNNING job only while workerID owns it.
 func (r *PostgresRepository) ExtendLease(ctx context.Context, jobID uuid.UUID, workerID string, ttl time.Duration) (bool, error) {
 	tag, err := r.pool.Exec(ctx, `UPDATE jobs SET locked_until=now()+$3*interval '1 second',updated_at=now() WHERE id=$1 AND locked_by=$2 AND status='RUNNING'`, jobID, workerID, int(ttl.Seconds()))
 	return tag.RowsAffected() == 1, err
 }
 
+// CreateAttempt creates a RUNNING attempt for compatibility with manual claims.
 func (r *PostgresRepository) CreateAttempt(ctx context.Context, jobID uuid.UUID, workerID string, attemptNumber int) (Attempt, error) {
 	const query = `INSERT INTO job_attempts (id, job_id, tenant_id, worker_id, attempt_number, status, started_at)
 SELECT $1,$2,tenant_id,$3,$4,'RUNNING',now() FROM jobs WHERE id=$2
@@ -294,21 +319,25 @@ RETURNING id, job_id, worker_id, attempt_number, status, started_at, completed_a
 	return scanAttempt(r.pool.QueryRow(ctx, query, uuid.New(), jobID, workerID, attemptNumber))
 }
 
+// CompleteAttempt marks a standalone attempt successful.
 func (r *PostgresRepository) CompleteAttempt(ctx context.Context, attemptID uuid.UUID, duration time.Duration) error {
 	_, err := r.pool.Exec(ctx, `UPDATE job_attempts SET status='SUCCEEDED', completed_at=now(), execution_duration_ms=$2 WHERE id=$1`, attemptID, duration.Milliseconds())
 	return err
 }
 
+// FailAttempt marks a standalone attempt failed with a diagnostic message.
 func (r *PostgresRepository) FailAttempt(ctx context.Context, attemptID uuid.UUID, duration time.Duration, message string) error {
 	_, err := r.pool.Exec(ctx, `UPDATE job_attempts SET status='FAILED', failed_at=now(), error_message=$2, execution_duration_ms=$3 WHERE id=$1`, attemptID, message, duration.Milliseconds())
 	return err
 }
 
+// MarkSucceeded performs an unconditional compatibility update.
 func (r *PostgresRepository) MarkSucceeded(ctx context.Context, jobID uuid.UUID) error {
 	_, err := r.pool.Exec(ctx, `UPDATE jobs SET status='SUCCEEDED', completed_at=now(), locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1`, jobID)
 	return err
 }
 
+// MarkSucceededByWorker succeeds a RUNNING job only for its owner.
 func (r *PostgresRepository) MarkSucceededByWorker(ctx context.Context, jobID uuid.UUID, workerID string) error {
 	tag, err := r.pool.Exec(ctx, `UPDATE jobs SET status='SUCCEEDED', completed_at=now(), locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1 AND locked_by=$2 AND status='RUNNING'`, jobID, workerID)
 	if err != nil {
@@ -320,11 +349,13 @@ func (r *PostgresRepository) MarkSucceededByWorker(ctx context.Context, jobID uu
 	return nil
 }
 
+// MarkFailedForRetry performs an unconditional compatibility retry update.
 func (r *PostgresRepository) MarkFailedForRetry(ctx context.Context, j Job, message string, nextRunAt time.Time) error {
 	_, err := r.pool.Exec(ctx, `UPDATE jobs SET status='RETRY_SCHEDULED', retry_count=retry_count+1, run_at=$2, last_error=$3, failed_at=now(), locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1`, j.ID, nextRunAt, message)
 	return err
 }
 
+// MarkFailedForRetryByWorker schedules retry only for the current owner.
 func (r *PostgresRepository) MarkFailedForRetryByWorker(ctx context.Context, j Job, workerID string, message string, nextRetryCount int, nextRunAt time.Time) error {
 	tag, err := r.pool.Exec(ctx, `UPDATE jobs SET status='RETRY_SCHEDULED', retry_count=$2, run_at=$3, last_error=$4, failed_at=now(), locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1 AND locked_by=$5 AND status='RUNNING'`, j.ID, nextRetryCount, nextRunAt, message, workerID)
 	if err != nil {
@@ -336,6 +367,7 @@ func (r *PostgresRepository) MarkFailedForRetryByWorker(ctx context.Context, j J
 	return nil
 }
 
+// MoveToDeadLetter performs an unconditional compatibility DLQ transaction.
 func (r *PostgresRepository) MoveToDeadLetter(ctx context.Context, j Job, message string) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -353,6 +385,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,now())`, uuid.New(), j.ID, j.Name, j.JobType, j.Pay
 	return tx.Commit(ctx)
 }
 
+// MoveToDeadLetterByWorker dead-letters a job only for its current owner.
 func (r *PostgresRepository) MoveToDeadLetterByWorker(ctx context.Context, j Job, workerID string, message string, finalRetryCount int) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -374,6 +407,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,now())`, uuid.New(), j.ID, j.Name, j.JobType, j.Pay
 	return tx.Commit(ctx)
 }
 
+// ReleaseClaim clears ownership and returns a job to the supplied claimable state.
 func (r *PostgresRepository) ReleaseClaim(ctx context.Context, jobID uuid.UUID, workerID string, status Status) error {
 	tag, err := r.pool.Exec(ctx, `UPDATE jobs SET status=$3, locked_by=NULL, locked_until=NULL, updated_at=now() WHERE id=$1 AND locked_by=$2 AND status='RUNNING'`, jobID, workerID, status)
 	if err != nil {
@@ -385,6 +419,7 @@ func (r *PostgresRepository) ReleaseClaim(ctx context.Context, jobID uuid.UUID, 
 	return nil
 }
 
+// TransitionJob applies an operator transition using tenant and current-state guards.
 func (r *PostgresRepository) TransitionJob(ctx context.Context, tenantID, id uuid.UUID, from []Status, to Status) error {
 	statuses := make([]string, 0, len(from))
 	for _, status := range from {
@@ -395,6 +430,8 @@ func (r *PostgresRepository) TransitionJob(ctx context.Context, tenantID, id uui
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The current-state predicate closes the race between service validation and
+	// this write if another operator or worker transitions the job first.
 	query := `UPDATE jobs SET status=$3, updated_at=now(), cancelled_at=CASE WHEN $3='CANCELLED' THEN now() ELSE cancelled_at END, locked_by=NULL, locked_until=NULL WHERE tenant_id=$1 AND id=$2 AND status = ANY($4)`
 	tag, err := tx.Exec(ctx, query, tenantID, id, to, statuses)
 	if err != nil {
@@ -415,6 +452,7 @@ func (r *PostgresRepository) TransitionJob(ctx context.Context, tenantID, id uui
 	return tx.Commit(ctx)
 }
 
+// RecoverExpiredRunningJobs finalizes expired attempts and schedules retry or DLQ.
 func (r *PostgresRepository) RecoverExpiredRunningJobs(ctx context.Context, reason string) (int64, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -461,6 +499,7 @@ func (r *PostgresRepository) RecoverExpiredRunningJobs(ctx context.Context, reas
 	return int64(len(items)), tx.Commit(ctx)
 }
 
+// ListDeadLetters returns tenant-scoped terminal failures in newest-first order.
 func (r *PostgresRepository) ListDeadLetters(ctx context.Context, tenantID uuid.UUID, page, pageSize int) ([]DeadLetterJob, error) {
 	page = normalizePage(page)
 	pageSize = normalizePageSize(pageSize)
@@ -480,6 +519,7 @@ func (r *PostgresRepository) ListDeadLetters(ctx context.Context, tenantID uuid.
 	return items, rows.Err()
 }
 
+// RequeueDeadLetter creates a fresh linked job while retaining the DLQ audit row.
 func (r *PostgresRepository) RequeueDeadLetter(ctx context.Context, tenantID, deadLetterID uuid.UUID, runAt time.Time) (Job, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"time"
 )
 
+// Recorder is the metrics boundary used by domain and worker services.
 type Recorder interface {
 	JobCreated(jobType string)
 	JobCompleted(jobType string, duration time.Duration)
@@ -13,11 +14,23 @@ type Recorder interface {
 	SetActiveWorkers(count int)
 }
 
+// NoopRecorder disables metrics while preserving the Recorder contract.
 type NoopRecorder struct{}
 
-func (NoopRecorder) JobCreated(jobType string)                           {}
+// JobCreated satisfies Recorder without recording a metric.
+func (NoopRecorder) JobCreated(jobType string) {}
+
+// JobCompleted satisfies Recorder without recording a metric.
 func (NoopRecorder) JobCompleted(jobType string, duration time.Duration) {}
-func (NoopRecorder) JobFailed(jobType string)                            {}
-func (NoopRecorder) JobDeadLettered(jobType string)                      {}
-func (NoopRecorder) WorkerClaimed(count int)                             {}
-func (NoopRecorder) SetActiveWorkers(count int)                          {}
+
+// JobFailed satisfies Recorder without recording a metric.
+func (NoopRecorder) JobFailed(jobType string) {}
+
+// JobDeadLettered satisfies Recorder without recording a metric.
+func (NoopRecorder) JobDeadLettered(jobType string) {}
+
+// WorkerClaimed satisfies Recorder without recording a metric.
+func (NoopRecorder) WorkerClaimed(count int) {}
+
+// SetActiveWorkers satisfies Recorder without recording a metric.
+func (NoopRecorder) SetActiveWorkers(count int) {}

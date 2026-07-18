@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// RequestID attaches an incoming or generated correlation ID to the request.
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Request-ID")

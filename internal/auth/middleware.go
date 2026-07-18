@@ -7,6 +7,8 @@ import (
 	"github.com/bhanuteja/distributed-job-scheduler/internal/response"
 )
 
+// Middleware authenticates X-API-Key and attaches a Principal to the request.
+// When disabled, it attaches the system principal for local development only.
 func Middleware(authenticator Authenticator, enabled bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +31,7 @@ func Middleware(authenticator Authenticator, enabled bool) func(http.Handler) ht
 	}
 }
 
+// Require wraps an endpoint with the minimum required role.
 func Require(role Role, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := FromContext(r.Context())

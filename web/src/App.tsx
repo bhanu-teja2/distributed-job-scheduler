@@ -5,6 +5,8 @@ import {Cell,Pie,PieChart,ResponsiveContainer,Tooltip} from 'recharts'
 import {Link,NavLink,Route,Routes,useNavigate,useParams,useSearchParams} from 'react-router-dom'
 import {api,getKey,Job,Page,setKey} from './api'
 
+// The dashboard intentionally polls REST resources instead of maintaining a
+// second real-time protocol; server state remains authoritative after refresh.
 const colors:Record<string,string>={SUCCEEDED:'#16815d',RUNNING:'#2475c5',PENDING:'#c18316',SCHEDULED:'#8057b7',RETRY_SCHEDULED:'#d45b28',FAILED:'#c73c45',DEAD_LETTERED:'#861f2b',CANCELLED:'#65717e',PAUSED:'#65717e'}
 function Status({value}:{value:string}){return <span className="status"><i style={{background:colors[value]||'#65717e'}}/>{value.replaceAll('_',' ')}</span>}
 function Login(){const[key,setValue]=useState('djs_local_development_key_change_me');const[error,setError]=useState('');const navigate=useNavigate();async function submit(e:FormEvent){e.preventDefault();setKey(key);try{await api('/api/v1/auth/whoami');navigate('/')}catch(err){setKey('');setError(err instanceof Error?err.message:'Authentication failed')}}return <main className="login"><form onSubmit={submit}><div className="brand-mark"><Activity/></div><h1>Scheduler Control</h1><p>Operations console for distributed job execution.</p><input className="sr-only" name="username" value="scheduler-api-client" autoComplete="username" readOnly/><label>API key<input type="password" value={key} onChange={e=>setValue(e.target.value)} autoComplete="current-password" autoFocus/></label>{error&&<div className="error"><AlertTriangle size={16}/>{error}</div>}<button className="primary"><KeyRound size={17}/>Connect</button></form></main>}

@@ -16,14 +16,18 @@ import (
 	"github.com/google/uuid"
 )
 
+// Handler translates HTTP requests into Service calls and response envelopes.
+// It intentionally contains no job lifecycle decisions.
 type Handler struct {
 	service *Service
 }
 
+// NewHandler creates the job HTTP adapter.
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
+// Routes returns CRUD, history, and lifecycle routes under /jobs.
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Post("/", auth.Require(auth.RoleOperator, h.create))
@@ -38,6 +42,7 @@ func (h *Handler) Routes() chi.Router {
 	return r
 }
 
+// DeadLetterRoutes returns tenant-scoped DLQ inspection and requeue routes.
 func (h *Handler) DeadLetterRoutes() chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", h.deadLetters)
@@ -47,6 +52,8 @@ func (h *Handler) DeadLetterRoutes() chi.Router {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateRequest
+	// Bound input size and reject unknown fields so API evolution fails loudly
+	// instead of silently accepting misspelled or unsupported options.
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {

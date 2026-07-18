@@ -17,6 +17,8 @@ import (
 	"github.com/google/uuid"
 )
 
+// Service applies tenant context, validation, defaults, idempotency, and state
+// transition rules before delegating persistence to Repository.
 type Service struct {
 	repo              Repository
 	now               func() time.Time
@@ -26,6 +28,7 @@ type Service struct {
 	metrics           observability.Recorder
 }
 
+// NewService creates the job application service with create-time defaults.
 func NewService(repo Repository, defaultRetries, defaultBackoffSec, defaultTimeoutSec int) *Service {
 	return &Service{
 		repo:              repo,
@@ -37,6 +40,7 @@ func NewService(repo Repository, defaultRetries, defaultBackoffSec, defaultTimeo
 	}
 }
 
+// WithMetrics replaces the default no-op metrics recorder.
 func (s *Service) WithMetrics(metrics observability.Recorder) *Service {
 	if metrics != nil {
 		s.metrics = metrics
@@ -44,6 +48,7 @@ func (s *Service) WithMetrics(metrics observability.Recorder) *Service {
 	return s
 }
 
+// Create validates and creates a job for the authenticated tenant.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResponse, error) {
 	req = s.withDefaults(req)
 	req.IdempotencyKey = strings.TrimSpace(req.IdempotencyKey)
@@ -56,6 +61,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResponse
 
 	principal := auth.PrincipalOrDefault(ctx)
 	createdBy := principal.ClientName
+	// Hash only canonical, behavior-affecting fields. The repository uses this
+	// hash to distinguish a safe replay from reuse of a key for another request.
 	requestBytes, _ := json.Marshal(struct {
 		Name                string          `json:"name"`
 		JobType             string          `json:"job_type"`
@@ -98,6 +105,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResponse
 	return CreateResponse{JobID: inserted.ID.String(), Status: inserted.Status, Replayed: replayed}, nil
 }
 
+// List validates filters before returning the authenticated tenant's jobs.
 func (s *Service) List(ctx context.Context, filter ListFilter) (Page, error) {
 	if filter.Status != "" && !isKnownStatus(filter.Status) {
 		return Page{}, fmt.Errorf("%w: unsupported status filter", appErrors.ErrInvalidInput)
@@ -123,27 +131,33 @@ func (s *Service) List(ctx context.Context, filter ListFilter) (Page, error) {
 	return s.repo.List(ctx, auth.PrincipalOrDefault(ctx).TenantID, filter)
 }
 
+// Get returns one tenant-owned job.
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Job, error) {
 	return s.repo.GetByID(ctx, auth.PrincipalOrDefault(ctx).TenantID, id)
 }
 
+// Attempts returns the ordered execution history for one job.
 func (s *Service) Attempts(ctx context.Context, id uuid.UUID) ([]Attempt, error) {
 	return s.repo.ListAttempts(ctx, auth.PrincipalOrDefault(ctx).TenantID, id)
 
 }
 
+// Events returns the durable lifecycle timeline for one job.
 func (s *Service) Events(ctx context.Context, id uuid.UUID) ([]Event, error) {
 	return s.repo.ListEvents(ctx, auth.PrincipalOrDefault(ctx).TenantID, id)
 }
 
+// ListDeadLetters returns terminal failures for the authenticated tenant.
 func (s *Service) ListDeadLetters(ctx context.Context, page, pageSize int) ([]DeadLetterJob, error) {
 	return s.repo.ListDeadLetters(ctx, auth.PrincipalOrDefault(ctx).TenantID, page, pageSize)
 }
 
+// RequeueDeadLetter creates a fresh job linked to a terminal failure.
 func (s *Service) RequeueDeadLetter(ctx context.Context, deadLetterID uuid.UUID) (Job, error) {
 	return s.repo.RequeueDeadLetter(ctx, auth.PrincipalOrDefault(ctx).TenantID, deadLetterID, s.now())
 }
 
+// Cancel stops claimable work or invalidates ownership of running work.
 func (s *Service) Cancel(ctx context.Context, id uuid.UUID) error {
 	if err := s.transition(ctx, id, StatusCancelled, []Status{StatusPending, StatusScheduled, StatusRetryScheduled, StatusRunning}); err != nil {
 		return err
@@ -151,14 +165,17 @@ func (s *Service) Cancel(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// Pause prevents pending or scheduled work from being claimed.
 func (s *Service) Pause(ctx context.Context, id uuid.UUID) error {
 	return s.transition(ctx, id, StatusPaused, []Status{StatusPending, StatusScheduled})
 }
 
+// Resume returns paused work to the scheduled state.
 func (s *Service) Resume(ctx context.Context, id uuid.UUID) error {
 	return s.transition(ctx, id, StatusScheduled, []Status{StatusPaused})
 }
 
+// Retry manually returns a failed job to the retry queue.
 func (s *Service) Retry(ctx context.Context, id uuid.UUID) error {
 	return s.transition(ctx, id, StatusRetryScheduled, []Status{StatusFailed})
 }
@@ -198,6 +215,7 @@ func (s *Service) withDefaults(req CreateRequest) CreateRequest {
 	return req
 }
 
+// NextRetryAt returns exponential backoff based on the retry count.
 func NextRetryAt(now time.Time, baseBackoffSeconds int, retryCount int) time.Time {
 	if baseBackoffSeconds <= 0 {
 		baseBackoffSeconds = 30
@@ -210,6 +228,7 @@ func NextRetryAt(now time.Time, baseBackoffSeconds int, retryCount int) time.Tim
 	return now.Add(delay)
 }
 
+// ShouldDeadLetter reports whether the configured retry budget is exhausted.
 func ShouldDeadLetter(retryCount, maxRetries int) bool {
 	return retryCount >= maxRetries
 }

@@ -41,6 +41,8 @@ func main() {
 	}
 	defer func() { _ = redisClient.Close() }()
 
+	// Compose the worker explicitly so the primary database claim, secondary
+	// Redis lease, webhook network policy, metrics, and registry are visible here.
 	repo := job.NewPostgresRepository(db)
 	executor := worker.NewExecutorWithOptions(worker.ExecutorOptions{AllowedHosts: cfg.WebhookAllowedHosts, AllowPrivateNetworks: cfg.WebhookAllowPrivate})
 	service := worker.NewService(repo, executor, log, "", cfg.WorkerConcurrency, cfg.WorkerBatchSize, cfg.WorkerPollInterval, cfg.JobLockTTL).

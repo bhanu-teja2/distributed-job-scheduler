@@ -13,6 +13,7 @@ import (
 var httpRequests = promauto.NewCounterVec(prometheus.CounterOpts{Name: "http_requests_total", Help: "HTTP requests by method, route, and status."}, []string{"method", "route", "status"})
 var httpDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{Name: "http_request_duration_seconds", Help: "HTTP request duration by method and route."}, []string{"method", "route"})
 
+// HTTPMiddleware records request count and latency by method, route, and status.
 func HTTPMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writer := middleware.NewWrapResponseWriter(w, r.ProtoMajor)

@@ -19,20 +19,22 @@ sequenceDiagram
     end
 ```
 
-Delivery is at least once. A relay crash between Kafka acknowledgement and `published_at` can publish the same `event_id` again, so consumers must deduplicate it.
-
-Kafka publishing is best effort. PostgreSQL remains the source of truth when publishing fails.
+Delivery is durable and at least once. A relay crash between Kafka acknowledgement and `published_at` can publish the same `event_id` again, so consumers must deduplicate it. PostgreSQL remains the source of truth and retains unpublished events while Kafka is unavailable.
 
 Envelope:
 
 ```json
 {
   "event_id": "uuid",
+  "schema_version": 1,
+  "tenant_id": "uuid",
   "event_type": "job.completed",
   "source": "worker",
   "entity_type": "job",
   "entity_id": "job_id",
-  "timestamp": "2026-07-02T12:00:00Z",
+  "occurred_at": "2026-07-02T12:00:00Z",
+  "correlation_id": "request-or-workflow-id",
+  "causation_id": "uuid",
   "payload": {}
 }
 ```
@@ -46,4 +48,4 @@ Events:
 - `job.retry_scheduled`
 - `job.dead_lettered`
 - `job.cancelled`
-- `worker.heartbeat`
+- `job.requeued`

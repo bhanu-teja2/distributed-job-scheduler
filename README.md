@@ -106,4 +106,4 @@ Production installations should set `existingSecret`, publish immutable image ta
 - Webhook idempotency headers control duplicate external effects.
 - This project intentionally excludes workflow DAGs, recurring cron schedules, multi-region consensus, billing, and real payment/email integrations.
 
-See [docs/interview-guide.md](docs/interview-guide.md) for the design narrative and tradeoffs.
+See [docs/code-guide.md](docs/code-guide.md) for the implementation reading order and [docs/interview-guide.md](docs/interview-guide.md) for the design narrative and tradeoffs.
